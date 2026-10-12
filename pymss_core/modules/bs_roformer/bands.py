@@ -200,15 +200,17 @@ class MaskEstimator(Module):
                     out = F.glu(grouped_linear(selected, weight, bias), dim=-1)
                     for band_position, band_out in zip(indices, out.unbind(dim=-2)): outs[band_position] = band_out
                 return torch.cat(outs, dim=-1)
-            next_x = None
+            outs = []
             for signature, indices in groups:
                 weight, bias = self._get_layer_group_params(layer_index, signature, indices, x.device, x.dtype)
                 band_index = self._indices_tensor(indices, x.device)
                 selected = group_x.index_select(-2, band_index)
                 out = grouped_linear(selected, weight, bias)
-                if next_x is None: next_x = out.new_empty(*group_x.shape[:-1], out.shape[-1])
-                next_x.index_copy_(-2, band_index, out)
-            group_x = next_x
+                # Group bands are contiguous ascending runs covering every band
+                # (see _layer_grouping_plan), so the scatter is an ordered concat;
+                # aten.index_copy_ has no AscendIR converter under torchair graphs.
+                outs.append(out)
+            group_x = torch.cat(outs, dim=-2) if len(outs) > 1 else outs[0]
         return F.glu(group_x, dim=-1).flatten(start_dim=-2)
     def _forward_by_band_fast(self, x):
         band_layers = self._band_groupable_layers()
@@ -287,7 +289,7 @@ class MaskEstimator(Module):
                         for group_position, band_position in enumerate(indices): offset_start = first._dim_offsets[band_position]; offset_end = first._dim_offsets[band_position + 1]; result[:, :, :, offset_start:offset_end] = out[:, :, :, group_position, :]
                 return result.permute(0, 2, 1, 3)
             out_dim = next(iter(out_dims))
-            next_x = None
+            outs = []
             for signature, indices in groups:
                 weight, bias = first._get_packed_layer_group_params(estimators, layer_index, signature, indices, x.device, x.dtype)
                 band_index = first._indices_tensor(indices, x.device)

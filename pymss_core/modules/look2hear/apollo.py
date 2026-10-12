@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 from torch import nn
+from pymss_core.npu_fft import istft_npu, stft_npu
 from ..mlx_backend import MpsBackendMixin
 from pymss_core.runtime_cache import _clear_cache_dicts
 def _cached_inference_tensor(module, name, tensor, input, version):
@@ -130,14 +131,19 @@ class Apollo(MpsBackendMixin, nn.Module):
     def mlx_forward_mx(self, raw_audio):
         from ..apollo_mlx import mlx_forward_apollo_mx
         return mlx_forward_apollo_mx(self, raw_audio, self.mps_model_compute_dtype)
-    def _window(self, input): return self.window.to(device=input.device)
+    def _window(self, input):
+        if input.device.type == "npu":
+            # torch_npu's hann_window hits an int64/float cast bug on device.
+            return self.window.to(dtype=torch.float32, device=input.device)
+        return self.window.to(device=input.device)
     def _uniform_band_prefix(self):
         width = self.band_width[0]
         return next((i for i, w in enumerate(self.band_width) if w != width), self.nband), width
     def _use_packed_band_ops(self): return not self.training and not torch.is_grad_enabled() and self._uniform_band_prefix()[0] > 1
     def _stft(self, input):
         B, nch, nsample = input.shape
-        return torch.stft(input.view(B * nch, nsample), n_fft=self.win, hop_length=self.stride, window=self._window(input), return_complex=True)
+        fn = stft_npu if input.device.type == "npu" else torch.stft
+        return fn(input.view(B * nch, nsample).float(), n_fft=self.win, hop_length=self.stride, window=self._window(input), return_complex=True)
     def _band_norm_power(self, spec, band_idx, width):
         this_spec = spec[:, band_idx : band_idx + width]
         power = ((this_spec.real.square() + this_spec.imag.square()).sum(1, keepdim=True) + self.eps).sqrt()  # B,1,T
@@ -210,4 +216,5 @@ class Apollo(MpsBackendMixin, nn.Module):
         B, nch, nsample = input.shape
         feature = self.net(self.feature_extractor(input))
         est_spec = self._estimate_spec_packed(feature, B * nch) if self._use_packed_band_ops() else self._estimate_spec_by_band(feature, B * nch)
-        return torch.istft(est_spec.to(dtype=torch.complex64), n_fft=self.win, hop_length=self.stride, window=self._window(input), length=nsample).view(B, nch, -1)
+        istft_fn = istft_npu if input.device.type == "npu" else torch.istft
+        return istft_fn(est_spec.to(dtype=torch.complex64), n_fft=self.win, hop_length=self.stride, window=self._window(input), length=nsample).view(B, nch, -1)

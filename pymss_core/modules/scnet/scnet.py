@@ -3,6 +3,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from ..mlx_backend import MpsBackendMixin
+from pymss_core.npu_fft import istft_npu, stft_npu
 from .separation import SeparationNet
 class Swish(nn.Module):
     def forward(self, x): return x * x.sigmoid()
@@ -74,12 +75,14 @@ class SCNet(MpsBackendMixin, nn.Module):
         padding = self.hop_length - x.shape[-1] % self.hop_length
         if (x.shape[-1] + padding) // self.hop_length % 2 == 0: padding += self.hop_length
         x = F.pad(x, (0, padding))
-        x = torch.view_as_real(torch.stft(x.reshape(-1, x.shape[-1]), **self.stft_config, return_complex=True))
+        stft_fn = stft_npu if x.device.type == "npu" else torch.stft
+        istft_fn = istft_npu if x.device.type == "npu" else torch.istft
+        x = torch.view_as_real(stft_fn(x.reshape(-1, x.shape[-1]), **self.stft_config, return_complex=True))
         x = x.permute(0, 3, 1, 2).reshape(B, self.audio_channels * 2, x.shape[1], x.shape[2])
         _B, _C, Fr, T = x.shape
         saved = []
         for sd_layer in self.encoder: x, skip, lengths, original_lengths = sd_layer(x); saved.append((skip, lengths, original_lengths))
         x = self.separation_net(x)
         for fusion_layer, su_layer in self.decoder: skip, lengths, original_lengths = saved.pop(); x = su_layer(fusion_layer(x, skip), lengths, original_lengths)
-        x = torch.istft(torch.view_as_complex(x.reshape(-1, 2, Fr, T).permute(0, 2, 3, 1).contiguous()), **self.stft_config)
+        x = istft_fn(torch.view_as_complex(x.reshape(-1, 2, Fr, T).permute(0, 2, 3, 1).contiguous()), **self.stft_config)
         return x.reshape(B, len(self.sources), self.audio_channels, -1)[:, :, :, :-padding]

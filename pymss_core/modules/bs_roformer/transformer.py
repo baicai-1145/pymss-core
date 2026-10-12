@@ -147,6 +147,10 @@ class Attention(Module):
         out = self._attention(q, k, v)
         # Some MPS SDPA versions return the expanded Q/K width instead of V's width.
         if self.use_pope and out.shape[-1] != v.shape[-1]: out = out[..., :v.shape[-1]]
+        # NOTE(ascend-kernels): fused_gated_out from pymss_core.npu_kernels is
+        # numerically equivalent but triton-ascend 3.2.1 memory kernels run ~3x
+        # slower than aclnn elementwise on 950PR (unvectorized loads), so the
+        # eager sigmoid+mul path stays until triton-ascend closes that gap.
         return self.to_out((out.transpose(1, 2) * self.to_gates(x).sigmoid().unsqueeze(-1)).flatten(start_dim=-2))
 class Transformer(Module):
     def __init__(self, *, dim, depth, dim_head=64, heads=8, attn_dropout=0.0, ff_dropout=0.0, ff_mult=4, norm_output=True, rotary_embed=None, flash_attn=True, shared_qkv_bias=None, shared_out_bias=None, pope_embed=None):
