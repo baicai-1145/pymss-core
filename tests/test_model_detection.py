@@ -18,6 +18,7 @@ from pymss_core import ModelTypeDetectionError, detect_model_type, get_model_fro
     ({"model": {"sr": 44100, "win": 20, "feature_dim": 128, "layer": 6}}, "apollo"),
     ({"model": {"in_channel": 2, "stems": ["vocals"], "band_specs": "musdb:vocals"}}, "bandit"),
     ({"kwargs": {"in_channels": 2, "stems": ["vocals"]}}, "bandit_v2"),
+    ({"model": {"resblock_kernel_sizes": [3, 7, 11], "resblock_dilation_sizes": [[1, 3, 5]] * 3, "upsample_kernel_sizes": [3]}}, "flashsr"),
 ])
 def test_detects_supported_yaml_structures_without_mutation(config, expected):
     original = deepcopy(config)
