@@ -1,7 +1,8 @@
 import torch
+import pytest
 import yaml
 
-from pymss_core import detect_model_type, get_model_from_config
+from pymss_core import detect_model_type, get_model_from_config, load_model_weights, load_state_dict
 from pymss_core.modules.flashsr import FlashSR
 
 
@@ -29,8 +30,22 @@ def test_flashsr_upsamples_three_times():
         assert model(torch.zeros(1, 1, 1600)).shape == (1, 1, 4800)
 
 
-def test_flashsr_loads_the_published_checkpoint_layout(tmp_path):
+@pytest.mark.parametrize("from_path", [False, True])
+def test_flashsr_loads_the_published_checkpoint_layout(tmp_path, from_path):
     model = FlashSR()
-    torch.save({"model": model.state_dict()}, tmp_path / "upsampler.pth")
-    checkpoint = torch.load(tmp_path / "upsampler.pth", map_location="cpu", weights_only=True)
-    assert model.load_state_dict(checkpoint["model"]).missing_keys == []
+    checkpoint = {"model": model.state_dict(), "iteration": 1, "optimizer": None, "learning_rate": 0.0001}
+    path = tmp_path / "upsampler.pth"
+    torch.save(checkpoint, path)
+    loaded = FlashSR()
+    result = load_model_weights(loaded, path if from_path else checkpoint, model_type="flashsr")
+    assert result.missing_keys == result.unexpected_keys == []
+    for name, value in model.state_dict().items():
+        torch.testing.assert_close(loaded.state_dict()[name], value)
+
+
+def test_flashsr_load_state_dict_unwraps_the_published_layout(tmp_path):
+    state_dict = FlashSR().state_dict()
+    path = tmp_path / "upsampler.pth"
+    torch.save({"model": state_dict}, path)
+    loaded = load_state_dict(path, model_type="flashsr", weights_only=True)
+    assert loaded.keys() == state_dict.keys()

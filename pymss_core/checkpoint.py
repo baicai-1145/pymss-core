@@ -1,6 +1,6 @@
 from pathlib import Path
 import torch
-STATE_DICT_KEYS = ("state", "state_dict", "model_state_dict")
+STATE_DICT_KEYS = ("state", "state_dict", "model_state_dict", "model")
 def unwrap_state_dict(checkpoint):
     """Return the model state dict from common MSS checkpoint containers."""
     if isinstance(checkpoint, dict):
