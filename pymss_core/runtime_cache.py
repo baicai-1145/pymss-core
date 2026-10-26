@@ -18,7 +18,7 @@ def clear_model_runtime_caches(model):
     cache_names = (
         "_pymss_cos_sin_cache", "_pymss_apollo_inference_cache",
         "_pymss_mlx_full_param_cache", "_pymss_mlx_cos_sin_cache", "_pymss_mlx_attention_cache",
-        "_pymss_mlx_feed_forward_cache", "_pymss_mlx_norm_cache", "_pymss_mlx_full_band_split_cache",
+        "_pymss_mlx_feed_forward_cache", "_pymss_mlx_compiled_feed_forward_cache", "_pymss_mlx_norm_cache", "_pymss_mlx_full_band_split_cache",
         "_pymss_mlx_full_mask_cache", "_pymss_mlx_full_mbr_cache",
     )
     first_error = None

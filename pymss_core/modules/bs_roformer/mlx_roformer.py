@@ -1,5 +1,5 @@
 import torch
-from ..mlx_backend import (conv1d, conv2d, glu, instance_norm2d, linear, maybe_eval, overlap_add, param, periodic_hann_window, reflect_pad_last, silu, to_mx, to_torch)
+from ..mlx_backend import (_cache_limit, conv1d, conv2d, glu, instance_norm2d, linear, maybe_eval, mx_dtype, overlap_add, param, periodic_hann_window, reflect_pad_last, silu, to_mx, to_torch)
 from . import hyperace_segm
 from .bands import contiguous_dim_groups
 from .bs_roformer_hyperace import BSRoformerHyperACE
@@ -72,7 +72,12 @@ def _band_split(module, x, dtype):
     import mlx.core as mx
     outs = []
     for group in _band_split_cache(module, dtype)["groups"]: group_x = x[..., group["offset_start"] : group["offset_end"]]; group_x = group_x.reshape(*group_x.shape[:-1], group["end"] - group["start"], group["dim_in"]); outs.append(_grouped_linear(_rms_norm(group_x, group["gamma"]), group["weight"], group["bias"]))
-    return mx.concatenate(outs, axis=-2)
+    # Keep dense skip residuals wide from their first projection: narrowing
+    # here could overflow before _forward_mask_core can restore FP32.
+    out = mx.concatenate(outs, axis=-2)
+    if getattr(module, "skip_connection", False): return out
+    # Other models restore the requested precision before the transformer.
+    return out.astype(mx_dtype(dtype))
 def _transformer(module, x, dtype):
     for attn, ff in module.layers:
         x = _mlx_attention(attn, x, dtype) + x
@@ -92,7 +97,9 @@ def _macaron_ff(module, x, dtype): return _mlx_feed_forward(module.ff, x, dtype)
 def _conformer_conv(module, x, dtype):
     # Sequential indices match ConformerConvModule / MSST checkpoints.
     norm, _, pointwise_in, _, depthwise, batch_norm, _, pointwise_out, _, _ = module.net
-    y = _rms_norm(x, param(norm, "gamma", norm.gamma, dtype)).transpose(0, 2, 1)
+    y = _rms_norm(x, param(norm, "gamma", norm.gamma, dtype))
+    if y.dtype != mx_dtype(dtype): y = y.astype(mx_dtype(dtype))
+    y = y.transpose(0, 2, 1)
     y = conv1d(pointwise_in, y, dtype)
     y = glu(y, axis=1)
     y = batch_norm1d(batch_norm, conv1d(depthwise, y, dtype), dtype)
@@ -203,14 +210,12 @@ def _hyperace(module, features, dtype):
     return out
 def _gated_fusion(module, f_in, h, dtype): return f_in + param(module, "gamma", module.gamma, dtype) * h
 def _backbone(module, x, dtype):
-    import mlx.core as mx
     x2 = _seq(module.p2, _dsconv_block(module.stem, x, dtype), dtype); segm_eval(x2)
     x3 = _seq(module.p3, x2, dtype); segm_eval(x3)
     x4 = _seq(module.p4, x3, dtype); segm_eval(x4)
     x5 = _seq(module.p5, x4, dtype); segm_eval(x5)
     return [x2, x3, x4, x5]
 def _decoder(module, enc_feats, h_ace, dtype):
-    import mlx.core as mx
     p2, p3, p4, p5 = enc_feats
     d5 = _gated_fusion(module.fusion_d5, _conv_block(module.skip_p5, p5, dtype), _conv_block(module.h_to_d5, _resize_bilinear_nchw(h_ace, p5.shape[2:]), dtype), dtype); segm_eval(d5)
     d4 = _ds_c3k2(module.up_d5, _resize_bilinear_nchw(d5, p4.shape[2:]), dtype) + _conv_block(module.skip_p4, p4, dtype)
@@ -226,7 +231,6 @@ def _tfc_tdf(module, x, dtype):
     return x
 def _freq_pixel_shuffle(module, x, dtype): x = _dsconv_block(module.conv, x, dtype); b, c_r, h, w = x.shape; out_c = c_r // module.scale; x = x.reshape(b, out_c, module.scale, h, w).transpose(0, 1, 3, 4, 2).reshape(b, out_c, h, w * module.scale); return _tfc_tdf(module.out_conv, x, dtype)
 def _progressive_upsample_head(module, x, dtype):
-    import mlx.core as mx
     x = _freq_pixel_shuffle(module.block1, x, dtype); segm_eval(x)
     x = _freq_pixel_shuffle(module.block2, x, dtype); segm_eval(x)
     x = _freq_pixel_shuffle(module.block3, x, dtype); segm_eval(x)
@@ -266,6 +270,11 @@ def _forward_mask_core(module, stft_repr, dtype):
     b, fs, model_t, complex_dim = stft_repr.shape
     x = _band_split(module, stft_repr.transpose(0, 2, 1, 3).reshape(b, model_t, fs * complex_dim), dtype)
     residual_store = [] if getattr(module, "skip_connection", False) else None
+    if residual_store is not None and x.dtype != stft_repr.dtype:
+        # Dense cross-layer skips can exceed FP16 range. Keep residuals at FFT
+        # precision; attention/FFN normalize in that precision, then cast their
+        # bounded activations before GEMM instead of downcasting the residual.
+        x = x.astype(stft_repr.dtype)
     for time_transformer, freq_transformer in module.layers:
         if residual_store is not None:
             for residual in residual_store: x = x + residual
@@ -292,13 +301,25 @@ def _mask_stft_repr_mbr(module, stft_repr, context, dtype):
     import mlx.core as mx
     bufs = _mbr_buffer_cache(module, dtype)
     freq_indices, denom = bufs["freq_indices"], bufs["denom"]
+    # Overlapping band masks are spectral DSP; accumulate at FFT precision even
+    # when the neural layers use FP16.
     masks = _forward_mask_core(module, stft_repr[:, freq_indices], dtype)
+    if masks.dtype != stft_repr.dtype:
+        masks = masks.astype(stft_repr.dtype)
+        mx.eval(masks)  # Drop the low-precision mask graph before DSP accumulation.
     masks_summed = mx.zeros((context["batch"], len(module.mask_estimators), stft_repr.shape[1], stft_repr.shape[-2], 2), dtype=masks.dtype).at[:, :, freq_indices, :, :].add(masks)
     return _complex_from_ri(stft_repr[:, None]) * _complex_from_ri(masks_summed / mx.maximum(denom, 1e-8))
 def mlx_forward_roformer_mx(module, raw_audio, dtype=_COMPUTE_DTYPE):
+    """Run MLX inference at the requested neural precision, with wider DSP/skips.
+
+    FP16 is not a guarantee of FP32-equivalent outputs. In particular, the
+    HyperACE ``full``/``segm_only`` segmentation heads can amplify quantization
+    differences; use explicit FP32 for fidelity checks on those branches.
+    """
     if getattr(module, "use_pope", False): raise NotImplementedError("PoPE models require the PyTorch backend")
     if dtype not in (torch.float16, torch.float32): raise TypeError("MLX full RoFormer supports torch.float16 or torch.float32 compute dtype")
     import mlx.core as mx
+    _cache_limit()  # Bound allocator reuse before even the first warmup/STFT stage.
     mx_dtype = mx.float16 if dtype == torch.float16 else mx.float32
     stft_repr, context = _stft_roformer(module, raw_audio.astype(mx_dtype), mx_dtype)
     mx.eval(stft_repr)
