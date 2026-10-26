@@ -1,5 +1,6 @@
 # Implementation adapted from https://github.com/EdwardDixon/snake under the MIT license.
 #   LICENSE is in incl_licenses directory.
+# Changes: relocated into pymss_core.modules.flashsr; see NOTICE.txt for provenance.
 
 import torch
 from torch import nn, sin, pow

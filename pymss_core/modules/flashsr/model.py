@@ -1,3 +1,7 @@
+# Adapted from FlashSR (Apache-2.0) and its HierSpeech++ ancestry (MIT).
+# Changes: omitted discriminators and added the FlashSR factory wrapper.
+# See NOTICE.txt and incl_licenses/ for source revisions and license texts.
+
 import torch
 from torch import nn
 from torch.nn import functional as F

@@ -8,7 +8,12 @@ version = "0.1.13"
 description = "Core model, configuration, and checkpoint package for music source separation."
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.10"
-license = "MIT"
+license = "MIT AND Apache-2.0"
+license-files = [
+    "LICENSE",
+    "pymss_core/modules/flashsr/NOTICE.txt",
+    "pymss_core/modules/flashsr/incl_licenses/*.txt",
+]
 authors = [
     { name = "KitsuneX07", email = "ghast1085654218@163.com" },
 ]
@@ -62,6 +67,10 @@ include = ["pymss_core*"]
 [tool.setuptools.package-data]
 pymss_core = [
     "resources/vr_modelparams/*.json",
+]
+"pymss_core.modules.flashsr" = [
+    "NOTICE.txt",
+    "incl_licenses/*.txt",
 ]
 
 [tool.uv]

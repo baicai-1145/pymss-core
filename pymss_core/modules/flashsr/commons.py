@@ -1,3 +1,6 @@
+# Adapted via FlashSR; see NOTICE.txt and incl_licenses/ for source and licenses.
+# Changes: relocated the helpers into pymss_core.modules.flashsr.
+
 import math
 import torch
 from torch.nn import functional as F

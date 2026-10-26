@@ -1,11 +1,12 @@
 from pathlib import Path
+from collections.abc import Mapping
 import torch
 STATE_DICT_KEYS = ("state", "state_dict", "model_state_dict", "model")
 def unwrap_state_dict(checkpoint):
     """Return the model state dict from common MSS checkpoint containers."""
     if isinstance(checkpoint, dict):
         for key in STATE_DICT_KEYS:
-            if key in checkpoint: return checkpoint[key]
+            if key in checkpoint and isinstance(checkpoint[key], Mapping): return checkpoint[key]
     return checkpoint
 def _install_demucs_pickle_stubs():
     # torch.load(weights_only=False) of facebook/demucs checkpoints needs the demucs.* module tree importable

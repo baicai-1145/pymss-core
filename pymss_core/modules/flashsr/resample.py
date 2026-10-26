@@ -1,5 +1,6 @@
 # Adapted from https://github.com/junjun3518/alias-free-torch under the Apache License 2.0
 #   LICENSE is in incl_licenses directory.
+# Changes: relocated into pymss_core.modules.flashsr; see NOTICE.txt for provenance.
 
 import torch.nn as nn
 from torch.nn import functional as F
