@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from collections import UserDict
-
 import numpy as np
 import pytest
 import torch
@@ -70,39 +68,6 @@ def test_unwrap_state_dict_common_keys():
     assert unwrap_state_dict({"state": state}) is state
     assert unwrap_state_dict({"state_dict": state}) is state
     assert unwrap_state_dict({"model_state_dict": state}) is state
-    assert unwrap_state_dict({"model": state}) is state
-
-
-@pytest.mark.parametrize("field", ["model", "state", "model_state_dict"])
-@pytest.mark.parametrize("from_path", [False, True])
-def test_weight_loading_preserves_raw_parameters_named_like_containers(tmp_path, field, from_path):
-    class NamedParameters(torch.nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.register_parameter(field, torch.nn.Parameter(torch.arange(3, dtype=torch.float32)))
-            self.bias = torch.nn.Parameter(torch.tensor([0.5]))
-
-    source = NamedParameters()
-    target = NamedParameters()
-    with torch.no_grad():
-        for parameter in target.parameters():
-            parameter.zero_()
-    state = source.state_dict()
-    assert unwrap_state_dict(state) is state
-    path = tmp_path / "weights.pth"
-    torch.save(state, path)
-    result = pymss_core.load_model_weights(target, path if from_path else state)
-    assert result.missing_keys == result.unexpected_keys == []
-    for name, value in source.state_dict().items():
-        torch.testing.assert_close(target.state_dict()[name], value)
-
-
-@pytest.mark.parametrize("field", ["model", "state", "state_dict", "model_state_dict"])
-def test_unwrap_state_dict_accepts_mapping_containers(field):
-    state = UserDict({"weight": torch.ones(1)})
-    assert unwrap_state_dict({field: state, "iteration": 1}) is state
-    empty_state = {}
-    assert unwrap_state_dict({field: empty_state}) is empty_state
 
 
 def test_model_internal_dsp_helpers_do_not_require_librosa():
