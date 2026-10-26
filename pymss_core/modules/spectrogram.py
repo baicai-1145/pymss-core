@@ -10,7 +10,9 @@ class SubbandSTFT:
     def __call__(self, x):
         b = x.shape[:-2]; c, l = x.shape[-2:]
         stft_fn = stft_npu if x.device.type == "npu" else torch.stft
-        x = torch.view_as_real(stft_fn(x.reshape(-1, l).float(), n_fft=self.n_fft, hop_length=self.hop_length, window=self.window.to(x.device), center=True, return_complex=True))
+        flat = x.reshape(-1, l)
+        if x.device.type == "npu": flat = flat.float()
+        x = torch.view_as_real(stft_fn(flat, n_fft=self.n_fft, hop_length=self.hop_length, window=self.window.to(x.device), center=True, return_complex=True))
         x = x.permute(0, 3, 1, 2)
         return x.reshape(*b, c * 2, -1, x.shape[-1])[..., : self.dim_f, :]
     def inverse(self, x):

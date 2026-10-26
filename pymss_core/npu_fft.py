@@ -32,7 +32,7 @@ _TINY = 1e-11
 
 def hann_window_npu(window_length: int, *, device, dtype=torch.float32, periodic: bool = True) -> torch.Tensor:
     """``torch.hann_window`` that avoids the device-side default-dtype bug."""
-    return torch.hann_window(window_length, periodic=periodic, dtype=dtype).to(device=device)
+    return torch.hann_window(window_length, periodic=periodic, dtype=dtype, device="cpu").to(device=device)
 
 def _fit_window(window: torch.Tensor, n_fft: int, win_length: int, device, dtype) -> torch.Tensor:
     window = window.to(device=device, dtype=dtype)
@@ -63,13 +63,15 @@ def stft_npu(
         raise TypeError("stft_npu expects a floating point input")
     if not onesided:
         raise NotImplementedError("two-sided stft_npu is not needed by pymss models")
+    if not return_complex:
+        raise ValueError("stft_npu requires return_complex=True")
     if pad_mode not in _VALID_PAD_MODES:
         raise ValueError(f"stft_npu supports pad modes {_VALID_PAD_MODES}, got {pad_mode!r}")
     hop = n_fft // 4 if hop_length is None else hop_length
     win_length = n_fft if win_length is None else win_length
     if window is None:
         # torch.stft with no explicit window applies a rectangular (ones) window.
-        window = torch.ones(n_fft, dtype=x.dtype, device=x.device)
+        window = torch.ones(win_length, dtype=x.dtype, device=x.device)
     window = _fit_window(window, n_fft, win_length, x.device, x.dtype)
 
     *lead, length = x.shape
@@ -88,8 +90,7 @@ def stft_npu(
     *lead_n, length_n = flat.shape
     n_frames = (length_n - n_fft) // hop + 1
     frames = flat.as_strided((*lead_n, n_frames, n_fft), (*flat.stride()[:-1], hop, 1)).contiguous() * window  # (N, 1, T, n_fft)
-    # torch.stft(normalized=True) scales the plain FFT output by sqrt(1/n_fft);
-    # that is a smaller factor than rfft's "ortho" norm (which also divides by sqrt(T)).
+    # torch.stft(normalized=True) scales the plain FFT output by sqrt(1/n_fft).
     spec = torch.fft.rfft(frames.squeeze(1), dim=-1)  # (N, T, F)
     if normalized:
         spec = spec * (1.0 / n_fft) ** 0.5
@@ -148,8 +149,8 @@ def istft_npu(
     norm.index_add_(1, idx, wsq[None, :].expand(batch, -1))
     out = out.reshape(*lead, out_len)[..., n_fft // 2 if center else 0 :]
     norm = norm.reshape(*lead, out_len)[..., n_fft // 2 if center else 0 :]
-    if center:
-        # torch.istft trims n_fft//2 from both ends under center=True.
+    if center and length is None:
+        # An explicit length may include samples reconstructed from right padding.
         trim = min(n_fft // 2, out.shape[-1])
         out = out[..., : out.shape[-1] - trim]
         norm = norm[..., : norm.shape[-1] - trim]

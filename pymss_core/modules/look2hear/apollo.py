@@ -143,7 +143,9 @@ class Apollo(MpsBackendMixin, nn.Module):
     def _stft(self, input):
         B, nch, nsample = input.shape
         fn = stft_npu if input.device.type == "npu" else torch.stft
-        return fn(input.view(B * nch, nsample).float(), n_fft=self.win, hop_length=self.stride, window=self._window(input), return_complex=True)
+        flat = input.view(B * nch, nsample)
+        if input.device.type == "npu": flat = flat.float()
+        return fn(flat, n_fft=self.win, hop_length=self.stride, window=self._window(input), return_complex=True)
     def _band_norm_power(self, spec, band_idx, width):
         this_spec = spec[:, band_idx : band_idx + width]
         power = ((this_spec.real.square() + this_spec.imag.square()).sum(1, keepdim=True) + self.eps).sqrt()  # B,1,T

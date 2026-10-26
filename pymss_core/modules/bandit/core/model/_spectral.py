@@ -9,7 +9,9 @@ class _TorchSpectrogram(nn.Module):
         return kwargs
     def forward(self, x):
         fn = stft_npu if x.device.type == "npu" else torch.stft
-        spec = fn(x.reshape(-1, x.shape[-1]).float(), **self._spectral_kwargs(), return_complex=True)
+        flat = x.reshape(-1, x.shape[-1])
+        if x.device.type == "npu": flat = flat.float()
+        spec = fn(flat, **self._spectral_kwargs(), return_complex=True)
         return spec.reshape(*x.shape[:-1], *spec.shape[-2:])
 class _TorchInverseSpectrogram(_TorchSpectrogram):
     def forward(self, x, length=None):

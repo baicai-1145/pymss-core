@@ -29,6 +29,30 @@ Apple Silicon 上可选安装 MLX backend：
 pip install "pymss-core[mlx]"
 ```
 
+## 昇腾 NPU
+
+请按 [Ascend 兼容性矩阵](https://github.com/Ascend/pytorch/blob/master/COMPATIBILITY.en.md)
+安装相互匹配的 PyTorch、`torch_npu`、CANN、固件及驱动。`torch_npu` 为可选组件，
+本包不会自动安装。频谱模型在 NPU 上使用专用 STFT/ISTFT 实现；CPU、CUDA 和 MPS
+继续使用原有路径。
+
+循环网络模型需要在导入 `torch_npu` 后启用 CPU 回退：
+
+```python
+import torch
+from pymss_core.npu_rnn import install_npu_rnn_fallback
+
+install_npu_rnn_fallback()
+model.eval()
+with torch.inference_mode():
+    output = model(audio)
+```
+
+回退仅处理 NPU 上的 RNN/LSTM/GRU 输入，支持打包序列。每次调用会将循环层权重及输入
+复制到 CPU，低精度输入使用 float32 计算，结果返回输入的设备及数据类型。
+此回退仅支持推理；启用梯度的 NPU 调用会明确报错。CPU/CUDA 的循环层执行及自动微分
+保持原生行为。`pymss` 选择 NPU 时会自动启用此回退。
+
 ## 公共 API
 
 ```python

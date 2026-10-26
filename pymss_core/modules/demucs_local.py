@@ -5,14 +5,16 @@ import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
-_HANN_CACHE = {}
 from pymss_core.npu_fft import istft_npu as _npu_fft_istft, stft_npu as _npu_fft_stft
+_HANN_CACHE = {}
 
 
 def _hann(n_fft, ref):  # hann_window is a pure function of n_fft: memoize per (len, device, dtype)
     key = (n_fft, ref.device, ref.dtype)
     w = _HANN_CACHE.get(key)
-    if w is None: w = _HANN_CACHE[key] = torch.hann_window(n_fft).to(ref)
+    if w is None:
+        w = torch.hann_window(n_fft, device="cpu", dtype=ref.dtype).to(ref) if ref.device.type == "npu" else torch.hann_window(n_fft).to(ref)
+        _HANN_CACHE[key] = w
     return w
 def pad1d(x, paddings, mode="constant", value=0.0):
     length, (left, right) = x.shape[-1], paddings

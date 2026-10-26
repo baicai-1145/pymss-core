@@ -2,7 +2,6 @@ from functools import partial
 import torch
 from torch import nn
 from ..mlx_backend import MpsBackendMixin
-from pymss_core.npu_fft import torch_stft_blocked
 from pymss_core.runtime_cache import _clear_cache_dicts
 from .bands import BandSplit, MaskEstimator
 from .conformer import Conformer
@@ -85,7 +84,10 @@ class RoformerRuntimeMixin(MpsBackendMixin):
             # Build the hann window in fp32 on the host and move it over: this
             # both avoids torch_npu's on-device int64/float cast bug and keeps
             # aten.hann_window out of torchair graphs (no AscendIR converter).
-            window = self.stft_window_fn(dtype=torch.float32).to(device)
+            if device.type == "npu":
+                window = self.stft_window_fn(device="cpu", dtype=torch.float32).to(device)
+            else:
+                window = self.stft_window_fn(device=device)
             self._stft_window_cache[key] = window
         return window
     def _active_source_indices(self): indices = getattr(self, "_pymss_source_indices", None); return None if indices is None else tuple(int(index) for index in indices)
