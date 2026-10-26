@@ -10,7 +10,7 @@ class ModelTypeDetectionError(RuntimeError):
 _MODEL_TYPES = frozenset({
     "bs_roformer", "bs_roformer_hyperace", "bs_conformer",
     "mel_band_roformer", "mel_band_conformer", "htdemucs", "mdx23c",
-    "apollo", "bandit", "bandit_v2", "scnet", "vr", "flashsr",
+    "apollo", "bandit", "bandit_v2", "scnet", "vr",
 })
 
 
@@ -66,8 +66,6 @@ def detect_model_type(config):
             candidates.add("scnet")
         if {"sr", "win", "feature_dim", "layer"} <= keys:
             candidates.add("apollo")
-        if {"resblock_kernel_sizes", "resblock_dilation_sizes", "upsample_kernel_sizes"} <= keys:
-            candidates.add("flashsr")
         if {"in_channel", "stems", "band_specs"} <= keys:
             candidates.add("bandit")
     kwargs = config.get("kwargs", {})

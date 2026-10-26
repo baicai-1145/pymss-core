@@ -4,16 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pymss-core"
-version = "0.1.13"
+version = "0.1.12"
 description = "Core model, configuration, and checkpoint package for music source separation."
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.10"
-license = "MIT AND Apache-2.0"
-license-files = [
-    "LICENSE",
-    "pymss_core/modules/flashsr/NOTICE.txt",
-    "pymss_core/modules/flashsr/incl_licenses/*.txt",
-]
+license = "MIT"
 authors = [
     { name = "KitsuneX07", email = "ghast1085654218@163.com" },
 ]
@@ -67,10 +62,6 @@ include = ["pymss_core*"]
 [tool.setuptools.package-data]
 pymss_core = [
     "resources/vr_modelparams/*.json",
-]
-"pymss_core.modules.flashsr" = [
-    "NOTICE.txt",
-    "incl_licenses/*.txt",
 ]
 
 [tool.uv]
