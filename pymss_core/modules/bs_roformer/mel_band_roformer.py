@@ -43,7 +43,7 @@ class MelBandRoformer(RoformerRuntimeMixin, Module):
         stft_repr = torch.view_as_complex(stft_repr.unsqueeze(1))
         num_stems = self._active_source_count()
         b, s, f, t = context.batch, num_stems, stft_repr.shape[2], stft_repr.shape[-1]
-        if stft_repr.device.type == "mps":  # MPS complex lacks view_as_complex path for stacked ri: scatter in real space
+        if stft_repr.device.type in ("mps", "npu"):  # MPS/NPU complex lacks a scatter_add_ path for stacked ri: scatter in real space
             masks = masks.contiguous().to(dtype=stft_repr.real.dtype)
             scatter_indices = self.freq_indices[None, None, :, None, None].expand(b, s, -1, t, 2)
             masks_summed = masks.new_zeros(b, s, f, t, 2)

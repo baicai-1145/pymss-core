@@ -9,8 +9,8 @@ from .pope import PoPE
 from .transformer import RMSNorm, Transformer  # noqa: F401 (RMSNorm re-export is part of the package surface)
 DEFAULT_FREQS_PER_BANDS = (2,) * 24 + (4,) * 12 + (12,) * 8 + (24,) * 8 + (48,) * 8 + (128, 129)
 class SpectralContext(tuple):
-    # (batch, channels, freq_bins, audio_length, stft_window, x_is_mps) with named access
-    def __new__(cls, batch, channels, freq_bins, audio_length, stft_window, x_is_mps): return super().__new__(cls, (batch, channels, freq_bins, audio_length, stft_window, x_is_mps))
+    # (batch, channels, freq_bins, audio_length, stft_window, x_is_mps, x_is_npu) with named access
+    def __new__(cls, batch, channels, freq_bins, audio_length, stft_window, x_is_mps, x_is_npu=False): return super().__new__(cls, (batch, channels, freq_bins, audio_length, stft_window, x_is_mps, x_is_npu))
     @property
     def batch(self): return self[0]
     @property
@@ -23,6 +23,8 @@ class SpectralContext(tuple):
     def stft_window(self): return self[4]
     @property
     def x_is_mps(self): return self[5]
+    @property
+    def x_is_npu(self): return self[6]
 class RotaryEmbedding(nn.Module):
     def __init__(self, dim, theta=10000): super().__init__(); freqs = 1.0 / (theta ** (torch.arange(0, dim, 2).float() / dim)); self.freqs = nn.Parameter(freqs, requires_grad=False); self.cache = {}
     def clear_runtime_cache(self): self.cache.clear()
@@ -78,7 +80,15 @@ class RoformerRuntimeMixin(MpsBackendMixin):
     def stft_window(self, device):
         key = (device.type, device.index, torch.float32)
         window = self._stft_window_cache.get(key)
-        if window is None or window.device != device: window = self.stft_window_fn(device=device); self._stft_window_cache[key] = window
+        if window is None or window.device != device:
+            # Build the hann window in fp32 on the host and move it over: this
+            # both avoids torch_npu's on-device int64/float cast bug and keeps
+            # aten.hann_window out of torchair graphs (no AscendIR converter).
+            if device.type == "npu":
+                window = self.stft_window_fn(device="cpu", dtype=torch.float32).to(device)
+            else:
+                window = self.stft_window_fn(device=device)
+            self._stft_window_cache[key] = window
         return window
     def _active_source_indices(self): indices = getattr(self, "_pymss_source_indices", None); return None if indices is None else tuple(int(index) for index in indices)
     def _active_mask_estimators(self): indices = self._active_source_indices(); return tuple(self.mask_estimators) if indices is None else tuple(self.mask_estimators[i] for i in indices)
@@ -100,7 +110,15 @@ class RoformerRuntimeMixin(MpsBackendMixin):
             if packed is not None: self._packed_mask_estimators_available = True; return packed
             self._packed_mask_estimators_available = False
         return torch.stack([fn(x) for fn in estimators], dim=1)
-    def _mask_stft_repr(self, stft_repr, context): self._warm_group_cache(stft_repr); mask = self._forward_mask_core(stft_repr); stft_repr = torch.view_as_complex(stft_repr.unsqueeze(1)); return stft_repr * torch.view_as_complex(mask).to(dtype=stft_repr.dtype)
+    def _mask_stft_repr(self, stft_repr, context):
+        self._warm_group_cache(stft_repr)
+        mask = self._forward_mask_core(stft_repr)
+        if mask.dtype != stft_repr.dtype:
+            # torch_npu cannot copy between complex dtypes (complex32 ->
+            # complex64); cast the underlying real tensor instead.
+            mask = mask.to(dtype=stft_repr.dtype)
+        stft_repr = torch.view_as_complex(stft_repr.unsqueeze(1))
+        return stft_repr * torch.view_as_complex(mask).to(dtype=stft_repr.dtype)
 def forward_roformer_mask_core(module, stft_repr):
     b, fs, model_t, complex_dim = stft_repr.shape
     x = module.band_split(stft_repr.permute(0, 2, 1, 3).reshape(b, model_t, fs * complex_dim))
@@ -114,27 +132,43 @@ def forward_roformer_mask_core(module, stft_repr):
         if residual_store is not None: residual_store.append(x)
     return mask_to_complex_shape(module._estimate_masks(module.final_norm(x)), complex_dim=2)
 def stft_roformer(module, raw_audio):
+    from pymss_core.npu_fft import stft_npu, torch_stft_blocked
     device, x_is_mps = raw_audio.device, raw_audio.device.type == "mps"
+    x_is_npu = torch_stft_blocked(raw_audio.device)
     if raw_audio.ndim == 2: raw_audio = raw_audio.unsqueeze(1)
     batch, audio_channels, audio_length = raw_audio.shape
     assert (not module.stereo and audio_channels == 1) or (module.stereo and audio_channels == 2), ("stereo needs to be set to True if passing in audio signal that is stereo (channel dimension of 2). " "also need to be False if mono (channel dimension of 1)")
     stft_window = module.stft_window(device)
-    try:
-        stft_repr = torch.stft(raw_audio.reshape(batch * audio_channels, audio_length), **module.stft_kwargs, window=stft_window, return_complex=True)
-    except RuntimeError:  # older MPS torch.stft: fall back to CPU
-        flat = raw_audio.reshape(batch * audio_channels, audio_length)
-        stft_repr = torch.stft(flat.cpu() if x_is_mps else flat, **module.stft_kwargs, window=stft_window.cpu() if x_is_mps else stft_window, return_complex=True).to(device)
+    flat = raw_audio.reshape(batch * audio_channels, audio_length)
+    if x_is_npu:
+        stft_repr = stft_npu(flat.float(), **module.stft_kwargs, window=stft_window, return_complex=True)
+    else:
+        try:
+            stft_repr = torch.stft(flat, **module.stft_kwargs, window=stft_window, return_complex=True)
+        except RuntimeError:  # older MPS torch.stft: fall back to CPU
+            stft_repr = torch.stft(flat.cpu() if x_is_mps else flat, **module.stft_kwargs, window=stft_window.cpu() if x_is_mps else stft_window, return_complex=True).to(device)
     stft_repr = torch.view_as_real(stft_repr).reshape(batch, audio_channels, -1, stft_repr.shape[-1], 2)
     b, s, f, t, c = stft_repr.shape
-    return (stft_repr.permute(0, 2, 1, 3, 4).reshape(b, f * s, t, c), SpectralContext(batch, audio_channels, f, audio_length, stft_window, x_is_mps))
+    return (stft_repr.permute(0, 2, 1, 3, 4).reshape(b, f * s, t, c), SpectralContext(batch, audio_channels, f, audio_length, stft_window, x_is_mps, x_is_npu))
 def istft_roformer(module, stft_repr, context, length):
-    b, n, _, t = stft_repr.shape
-    stft_repr = (stft_repr.reshape(b, n, context.freq_bins, context.channels, t).permute(0, 1, 3, 2, 4) .reshape(b * n * context.channels, context.freq_bins, t))
+    from pymss_core.npu_fft import istft_npu
+    # Input is complex (b, n, f*channels, t) — the product of stft_repr * mask.
+    # torch_npu runs complex64 transposes on the AI_CPU (~6ms each); rearrange
+    # channels in the REAL domain on the vector cores instead.
+    b, n, fs, t = stft_repr.shape
+    real = (torch.view_as_real(stft_repr)
+            .reshape(b, n, context.freq_bins, context.channels, t, 2)
+            .permute(0, 1, 3, 2, 4, 5)
+            .reshape(b * n * context.channels, context.freq_bins, t, 2).contiguous())
+    stft_repr = torch.view_as_complex(real)
     if getattr(module, "zero_dc", False): stft_repr[:, 0] = 0.0
-    try:
-        recon_audio = torch.istft(stft_repr, **module.stft_kwargs, window=context.stft_window, return_complex=False, length=length)
-    except RuntimeError:  # older MPS torch.istft: fall back to CPU
-        recon_audio = torch.istft(stft_repr.cpu() if context.x_is_mps else stft_repr, **module.stft_kwargs, window=context.stft_window.cpu() if context.x_is_mps else context.stft_window, return_complex=False, length=length).to(context.stft_window.device)
+    if context.x_is_npu:
+        recon_audio = istft_npu(stft_repr, **module.stft_kwargs, window=context.stft_window, return_complex=False, length=length)
+    else:
+        try:
+            recon_audio = torch.istft(stft_repr, **module.stft_kwargs, window=context.stft_window, return_complex=False, length=length)
+        except RuntimeError:  # older MPS torch.istft: fall back to CPU
+            recon_audio = torch.istft(stft_repr.cpu() if context.x_is_mps else stft_repr, **module.stft_kwargs, window=context.stft_window.cpu() if context.x_is_mps else context.stft_window, return_complex=False, length=length).to(context.stft_window.device)
     recon_audio = recon_audio.reshape(context.batch, n, context.channels, recon_audio.shape[-1])
     return recon_audio[:, 0] if n == 1 else recon_audio
 def forward_spectral_roformer(module, raw_audio, match_input_audio_length=True): stft_repr, context = stft_roformer(module, raw_audio); return istft_roformer(module, module._mask_stft_repr(stft_repr, context), context, context.audio_length if match_input_audio_length else None)

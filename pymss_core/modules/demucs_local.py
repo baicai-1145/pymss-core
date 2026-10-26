@@ -5,11 +5,16 @@ import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
+from pymss_core.npu_fft import istft_npu as _npu_fft_istft, stft_npu as _npu_fft_stft
 _HANN_CACHE = {}
+
+
 def _hann(n_fft, ref):  # hann_window is a pure function of n_fft: memoize per (len, device, dtype)
     key = (n_fft, ref.device, ref.dtype)
     w = _HANN_CACHE.get(key)
-    if w is None: w = _HANN_CACHE[key] = torch.hann_window(n_fft).to(ref)
+    if w is None:
+        w = torch.hann_window(n_fft, device="cpu", dtype=ref.dtype).to(ref) if ref.device.type == "npu" else torch.hann_window(n_fft).to(ref)
+        _HANN_CACHE[key] = w
     return w
 def pad1d(x, paddings, mode="constant", value=0.0):
     length, (left, right) = x.shape[-1], paddings
@@ -22,14 +27,16 @@ def pad1d(x, paddings, mode="constant", value=0.0):
 def spectro(x, n_fft=512, hop_length=None, pad=0):
     *other, length = x.shape
     if x.device.type == "mps": x = x.cpu()
-    z = torch.stft(x.reshape(-1, length), n_fft * (1 + pad), hop_length or n_fft // 4, window=_hann(n_fft, x), win_length=n_fft, normalized=True, center=True, return_complex=True, pad_mode="reflect")
+    fn = _npu_fft_stft if x.device.type == "npu" else torch.stft
+    z = fn(x.reshape(-1, length), n_fft * (1 + pad), hop_length or n_fft // 4, window=_hann(n_fft, x), win_length=n_fft, normalized=True, center=True, return_complex=True, pad_mode="reflect")
     return z.view(*other, z.shape[-2], z.shape[-1])
 def ispectro(z, hop_length=None, length=None, pad=0):
     *other, freqs, frames = z.shape
     n_fft = 2 * freqs - 2
     win_length = n_fft // (1 + pad)
     if z.device.type == "mps": z = z.cpu()
-    x = torch.istft(z.reshape(-1, freqs, frames), n_fft, hop_length, window=_hann(win_length, z.real), win_length=win_length, normalized=True, length=length, center=True)
+    fn = _npu_fft_istft if z.device.type == "npu" else torch.istft
+    x = fn(z.reshape(-1, freqs, frames), n_fft, hop_length, window=_hann(win_length, z.real), win_length=win_length, normalized=True, length=length, center=True)
     return x.view(*other, x.shape[-1])
 def rescale_module(module, reference):
     for sub in module.modules():

@@ -27,7 +27,11 @@ class NormMLP(BaseNormMLP):
     def reshape_output(self, mb):
         b, t = mb.shape[:2]
         mb = mb.reshape(b, t, self.in_channels, self.bandwidth, self.reim)
-        if self.complex_mask: mb = torch.view_as_complex(mb.contiguous())
+        if self.complex_mask:
+            if mb.device.type == "npu" and mb.dtype != torch.float32:
+                # torch_npu cannot build complex32 views; cast the real tensor first.
+                mb = mb.float()
+            mb = torch.view_as_complex(mb.contiguous())
         return mb.permute(0, 2, 3, 1)
     def forward(self, qb):
         from torch.utils.checkpoint import checkpoint_sequential
@@ -77,7 +81,11 @@ class OverlappingMaskEstimationModule(MaskEstimationModuleBase):
         b, n_bands, t, _ = q.shape
         mask_list = self.compute_masks(q) if self.compute_all_masks else None
         dtype = torch.complex64 if self.output_dtype == "complex64" else mask_list[0].dtype
-        masks = torch.zeros(b, self.in_channels, self.n_freq, t, device=q.device, dtype=dtype)
+        if dtype == torch.complex64 and q.device.type == "npu":
+            # torch_npu cannot zero-fill complex64 directly; build from real parts.
+            masks = torch.view_as_complex(torch.zeros(b, self.in_channels, self.n_freq, t, 2, device=q.device, dtype=torch.float32))
+        else:
+            masks = torch.zeros(b, self.in_channels, self.n_freq, t, device=q.device, dtype=dtype)
         for im in range(n_bands):
             fstart, fend = self.band_specs[im]
             mask = mask_list[im] if mask_list is not None else self.compute_mask(q, im)

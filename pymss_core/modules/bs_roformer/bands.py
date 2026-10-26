@@ -183,6 +183,13 @@ class MaskEstimator(Module):
             for kind, weight, bias in self._get_group_params(start, end, x.device, x.dtype): group_x = grouped_linear(group_x, weight, bias) if kind == "linear" else inference_tanh(group_x)
             return F.glu(group_x, dim=-1).flatten(start_dim=-2)
         return torch.cat([forward_group(start, end) for start, end, _ in self._dim_groups], dim=-1)
+    def _merge_layer_groups(self, outs, groups, device):
+        result = torch.cat(outs, dim=-2) if len(outs) > 1 else outs[0]
+        order = tuple(index for _, indices in groups for index in indices)
+        if order != tuple(range(len(order))):
+            inverse = tuple(sorted(range(len(order)), key=order.__getitem__))
+            result = result.index_select(-2, self._indices_tensor(inverse, device))
+        return result
     def _forward_layer_grouped_mlp(self, x):
         plan = self._layer_grouping_plan()
         if plan is None: return None
@@ -200,15 +207,15 @@ class MaskEstimator(Module):
                     out = F.glu(grouped_linear(selected, weight, bias), dim=-1)
                     for band_position, band_out in zip(indices, out.unbind(dim=-2)): outs[band_position] = band_out
                 return torch.cat(outs, dim=-1)
-            next_x = None
+            outs = []
             for signature, indices in groups:
                 weight, bias = self._get_layer_group_params(layer_index, signature, indices, x.device, x.dtype)
                 band_index = self._indices_tensor(indices, x.device)
                 selected = group_x.index_select(-2, band_index)
                 out = grouped_linear(selected, weight, bias)
-                if next_x is None: next_x = out.new_empty(*group_x.shape[:-1], out.shape[-1])
-                next_x.index_copy_(-2, band_index, out)
-            group_x = next_x
+                # Avoid index_copy_ for AscendIR, preserving noncontiguous band groups.
+                outs.append(out)
+            group_x = self._merge_layer_groups(outs, groups, x.device)
         return F.glu(group_x, dim=-1).flatten(start_dim=-2)
     def _forward_by_band_fast(self, x):
         band_layers = self._band_groupable_layers()
@@ -265,7 +272,7 @@ class MaskEstimator(Module):
         plan = first._layer_grouping_plan()
         streamed = MaskEstimator._forward_packed_estimators_two_layer_stream(estimators, x, plan)
         if streamed is not None: return streamed
-        stem_count,band_count,group_x = len(estimators), len(first.to_freqs), x
+        stem_count,group_x = len(estimators), x
         for layer_index, (kind, groups) in enumerate(plan):
             if kind == "tanh": group_x = inference_tanh(group_x); continue
             out_dims = {signature[1] for signature, _ in groups}
@@ -287,7 +294,7 @@ class MaskEstimator(Module):
                         for group_position, band_position in enumerate(indices): offset_start = first._dim_offsets[band_position]; offset_end = first._dim_offsets[band_position + 1]; result[:, :, :, offset_start:offset_end] = out[:, :, :, group_position, :]
                 return result.permute(0, 2, 1, 3)
             out_dim = next(iter(out_dims))
-            next_x = None
+            outs = []
             for signature, indices in groups:
                 weight, bias = first._get_packed_layer_group_params(estimators, layer_index, signature, indices, x.device, x.dtype)
                 band_index = first._indices_tensor(indices, x.device)
@@ -295,9 +302,8 @@ class MaskEstimator(Module):
                 b, t, s, g, d = selected.shape
                 out = grouped_linear(selected.reshape(b, t, s * g, d), weight, bias)
                 out = out.reshape(b, t, s, g, out_dim)
-                if next_x is None: next_x = out.new_empty(x.shape[0], x.shape[1], stem_count, band_count, out_dim)
-                next_x.index_copy_(-2, band_index, out)
-            group_x = next_x
+                outs.append(out)
+            group_x = first._merge_layer_groups(outs, groups, x.device)
         out = F.glu(group_x, dim=-1).flatten(start_dim=-2)
         return out.permute(0, 2, 1, 3)
     @staticmethod

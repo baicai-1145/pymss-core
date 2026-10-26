@@ -29,6 +29,32 @@ Optional MLX backend on Apple Silicon:
 pip install "pymss-core[mlx]"
 ```
 
+## Ascend NPU
+
+Install matching PyTorch, `torch_npu`, CANN, firmware, and driver versions from the
+[Ascend compatibility matrix](https://github.com/Ascend/pytorch/blob/master/COMPATIBILITY.en.md).
+`torch_npu` is optional and is not installed by this package. Spectral models use
+NPU-specific STFT/ISTFT helpers; CPU, CUDA, and MPS retain their native paths.
+
+For recurrent models, enable the CPU fallback after importing `torch_npu`:
+
+```python
+import torch
+from pymss_core.npu_rnn import install_npu_rnn_fallback
+
+install_npu_rnn_fallback()
+model.eval()
+with torch.inference_mode():
+    output = model(audio)
+```
+
+The fallback handles NPU RNN/LSTM/GRU inputs only, including packed sequences.
+It copies recurrent weights and inputs to CPU for each call, computes low-precision
+inputs in float32, and returns results to the input device and dtype. It supports
+inference only; NPU training with this fallback raises an error. CPU/CUDA recurrent
+execution and autograd remain native. `pymss` enables the fallback automatically
+when selecting NPU.
+
 ## Public API
 
 ```python
