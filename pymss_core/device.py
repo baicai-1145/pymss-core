@@ -493,6 +493,14 @@ def prepare_device_alias(alias: str) -> str:
         conv1d=profile_now.grouped_conv1d,
         complex_cat=profile_now.complex_cat,
     )
+    # Recurrent cells: the fused _VF.lstm is both wrong and catastrophically slow
+    # on BIREN (605 s for one (18, 57, 128) call), and the profile already says
+    # so, so preparing the device installs the fallback instead of leaving it to
+    # whichever caller remembers.
+    if profile_now.needs_rnn_fallback or profile_now.rnn_blocked:
+        from pymss_core.npu_rnn import install_rnn_cpu_fallback
+
+        install_rnn_cpu_fallback()
     return device_type
 
 

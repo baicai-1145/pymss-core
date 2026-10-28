@@ -128,6 +128,12 @@ class OverlappingMaskEstimationModule(MaskEstimationModuleBase):
                     mask = mask.unsqueeze(-1)
                 elif mask.dim() == total.dim() + 1:
                     total = total.unsqueeze(-1)
+            if os.environ.get("PYMSS_DEBUG_MASKS"):
+                print(
+                    f"      planes={tuple(mask.shape)} {mask.dtype}"
+                    f" total={None if total is None else (tuple(total.shape), total.dtype)}",
+                    flush=True,
+                )
             total = mask if total is None else total + mask
         if total is not None:
             masks = torch.view_as_complex(total.contiguous()) if total_is_complex else total

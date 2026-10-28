@@ -314,3 +314,23 @@ def test_biren_uses_bfloat16_autocast(monkeypatch):
     assert profile.amp is True
     assert profile.amp_dtype is torch.bfloat16
     assert profile.interpolate_shim is True
+
+
+def test_prepare_device_installs_the_rnn_fallback(monkeypatch):
+    """A profile that says rnn=False must be made usable by prepare_device_alias."""
+    import pymss_core.device as dev
+    import pymss_core.npu_rnn as rnn
+
+    fake = dev.DeviceProfile(
+        dev.BIREN, "cpu", plugin=None, complex_fft=False, rnn=False, amp=True,
+        amp_dtype=torch.bfloat16, channels_last=False, multi_device=False,
+    )
+    monkeypatch.setattr(dev, "profile_for_alias", lambda alias: fake)
+    monkeypatch.setattr(dev, "set_current_vendor_device", lambda device_type: None)
+    monkeypatch.setattr(dev, "device_profile", lambda device=None: fake)
+    rnn._installed = False
+    try:
+        dev.prepare_device_alias("biren")
+        assert rnn._installed is True
+    finally:
+        rnn._installed = False
