@@ -17,6 +17,7 @@ from pymss_core.device import (
     NVIDIA,
     ROCM,
     amp_supported,
+    autocast_dtype,
     clear_device_cache,
     rnn_op_blocked,
     detect_vendor,
@@ -192,3 +193,11 @@ def test_rnn_blocked_selects_single_cells(monkeypatch):
     assert rnn_op_blocked("supa", "gru") is True
     assert rnn_op_blocked("supa", "lstm") is False
     device_mod.clear_device_cache()
+
+
+def test_autocast_dtype_follows_the_profile():
+    """BIREN br10x has no float16 matmul, so autocast must ask for bfloat16."""
+    assert autocast_dtype("cuda") is torch.float16
+    assert autocast_dtype("supa") is torch.bfloat16
+    # amp=False devices fall back to plain float32.
+    assert autocast_dtype("cpu") is torch.float32

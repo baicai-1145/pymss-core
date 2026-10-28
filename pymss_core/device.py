@@ -100,6 +100,8 @@ class DeviceProfile:
         rnn_blocked: individual cells (``"lstm"``/``"gru"``/``"rnn"``) that must
             bounce through CPU although the rest of the family is native.
         amp: ``torch.amp.autocast`` is usable for the device type.
+        amp_dtype: dtype autocast should use; bfloat16 where the vendor has no
+            float16 matmul (BIREN br10x).
         channels_last: ``channels_last`` memory format is beneficial/supported.
         multi_device: more than one device index is usable.
     """
@@ -111,6 +113,7 @@ class DeviceProfile:
     rnn: bool = True
     rnn_blocked: frozenset[str] = frozenset()
     amp: bool = True
+    amp_dtype: torch.dtype = torch.float16
     channels_last: bool = True
     multi_device: bool = True
 
@@ -161,7 +164,12 @@ _PROFILES: dict[str, DeviceProfile] = {
     #   a manual unrolled cell built from matmul/sigmoid/tanh matches to 2e-06.
     #   GRU additionally raises for a missing ``aten::_thnn_fused_gru_cell``.
     #   Recurrent cells therefore always bounce through CPU on this stack.
-    BIREN: DeviceProfile(BIREN, "supa", plugin="torch_br", complex_fft=False, rnn=False),
+    # * float16 is unusable: br10x matmul takes bf16/fp32/s8/u8 only and
+    #   ``torch.autocast("supa", dtype=torch.float16)`` raises "Current SUPA
+    #   Device does not support float16. Please switch dtype to bfloat16."
+    BIREN: DeviceProfile(
+        BIREN, "supa", plugin="torch_br", complex_fft=False, rnn=False, amp_dtype=torch.bfloat16
+    ),
     MLU: DeviceProfile(MLU, "mlu", plugin="torch_mlu"),
     # Ascend's torch_npu builds ship npu_lstm/npu_gru without inference support
     # and lack a complex STFT path, so both fallbacks are part of the profile.
@@ -360,6 +368,12 @@ def rnn_op_blocked(device, op: str) -> bool:
     return str(op).lower() in profile.rnn_blocked
 
 
+def autocast_dtype(device=None) -> torch.dtype:
+    """Return the autocast dtype the backend supports (float16 or bfloat16)."""
+    profile = device_profile(device)
+    return profile.amp_dtype if profile.amp else torch.float32
+
+
 def amp_supported(device=None) -> bool:
     """Return ``True`` when autocast is usable on ``device``."""
     return device_profile(device).supports_amp
@@ -381,6 +395,7 @@ __all__ = (
     "NVIDIA",
     "ROCM",
     "amp_supported",
+    "autocast_dtype",
     "clear_device_cache",
     "detect_vendor",
     "device_profile",
