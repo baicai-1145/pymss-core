@@ -248,3 +248,40 @@ class TestGroupedConv1d:
 
         clear_device_cache()
         assert device_profile("supa").grouped_conv1d is True
+
+
+class TestComplexCat:
+    """torch.cat of complex tensors dies inside Concat.cpp (SUDNN, ErrorCode 11)."""
+
+    def test_concatenates_through_the_planes(self):
+        from pymss_core.vendor_shims import install_complex_cat_shim, reset_shims
+
+        reset_shims()
+        a = torch.complex(torch.randn(2, 3), torch.randn(2, 3))
+        b = torch.complex(torch.randn(2, 4), torch.randn(2, 4))
+        want = torch.cat([a, b], dim=1)
+        install_complex_cat_shim()
+        got = torch.cat([a, b], dim=1)
+        assert torch.equal(got, want)
+        assert got.dtype == torch.complex64
+        reset_shims()
+
+    def test_mixed_dtype_list_is_left_alone(self):
+        from pymss_core.vendor_shims import install_complex_cat_shim, reset_shims
+
+        reset_shims()
+        install_complex_cat_shim()
+        a = torch.complex(torch.randn(2, 3), torch.randn(2, 3))
+        with pytest.raises(RuntimeError):
+            torch.cat([a, torch.randn(2, 3)], dim=1)
+        reset_shims()
+
+    def test_real_cat_is_unaffected(self):
+        from pymss_core.vendor_shims import install_complex_cat_shim, reset_shims
+
+        reset_shims()
+        a, b = torch.randn(2, 3), torch.randn(2, 3)
+        want = torch.cat([a, b], dim=1)
+        install_complex_cat_shim()
+        assert torch.equal(torch.cat([a, b], dim=1), want)
+        reset_shims()

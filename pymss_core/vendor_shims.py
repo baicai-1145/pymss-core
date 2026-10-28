@@ -452,6 +452,37 @@ def install_conv1d_shim() -> bool:
     return True
 
 
+def install_complex_cat_shim() -> bool:
+    """Concatenate complex tensors through their real planes.
+
+    ``torch.cat`` of complex tensors reaches SUDNN on BIREN and dies inside
+    Concat.cpp with ``ErrorCode: 11``.  Concatenating the real planes and
+    rebuilding the complex view is exact and uses the kernel that works.
+
+    Returns:
+        ``True`` when the shim was installed, ``False`` when it already was.
+    """
+    if "complex_cat" in _installed:
+        return False
+
+    original = torch.cat
+
+    def cat(tensors, dim=0, *args, **kwargs):
+        seq = list(tensors) if not isinstance(tensors, torch.Tensor) else [tensors]
+        if len(seq) > 1 and all(isinstance(t, torch.Tensor) for t in seq):
+            device = seq[0].device
+            all_complex = all(t.is_complex() for t in seq)
+            if all_complex and device.type not in ("cpu", "meta"):
+                planes = original([torch.view_as_real(t.contiguous()) for t in seq], dim, *args, **kwargs)
+                return torch.view_as_complex(planes.contiguous())
+        return original(tensors, dim, *args, **kwargs)
+
+    cat._vendor_shim = True
+    torch.cat = cat
+    _installed.add("complex_cat")
+    return True
+
+
 #: Shim name -> installer.
 SHIMS = {
     "complex_mul": install_complex_mul_shim,
@@ -461,6 +492,7 @@ SHIMS = {
     "group_norm": install_group_norm_shim,
     "interpolate": install_interpolate_shim,
     "conv1d": install_conv1d_shim,
+    "complex_cat": install_complex_cat_shim,
 }
 
 
@@ -474,6 +506,7 @@ def install_vendor_shims(
     group_norm: bool = True,
     interpolate: bool = True,
     conv1d: bool = False,
+    complex_cat: bool = False,
 ) -> list[str]:
     """Install the shims a device profile asks for.
 
@@ -486,6 +519,7 @@ def install_vendor_shims(
         group_norm: ``True`` when ``F.group_norm`` should be replaced.
         interpolate: ``True`` when bf16 interpolation must run in fp32.
         conv1d: ``False`` when grouped conv1d must be split per group.
+        complex_cat: ``True`` when complex ``torch.cat`` must go via the planes.
 
     Returns:
         The shim names that were installed by this call.
@@ -507,6 +541,8 @@ def install_vendor_shims(
         wanted.append("interpolate")
     if conv1d:
         wanted.append("conv1d")
+    if complex_cat:
+        wanted.append("complex_cat")
     installed = []
     for name in wanted:
         if SHIMS[name]():
