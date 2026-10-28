@@ -266,14 +266,18 @@ class TestComplexCat:
         assert got.dtype == torch.complex64
         reset_shims()
 
-    def test_mixed_dtype_list_is_left_alone(self):
+    def test_mixed_dtype_list_is_left_to_torch(self):
+        """torch promotes a mixed list itself; the shim must not interfere."""
         from pymss_core.vendor_shims import install_complex_cat_shim, reset_shims
 
         reset_shims()
-        install_complex_cat_shim()
         a = torch.complex(torch.randn(2, 3), torch.randn(2, 3))
-        with pytest.raises(RuntimeError):
-            torch.cat([a, torch.randn(2, 3)], dim=1)
+        b = torch.randn(2, 3)
+        want = torch.cat([a, b], dim=1)
+        install_complex_cat_shim()
+        got = torch.cat([a, b], dim=1)
+        assert got.dtype == want.dtype == torch.complex64
+        assert torch.equal(got, want)
         reset_shims()
 
     def test_real_cat_is_unaffected(self):
