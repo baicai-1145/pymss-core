@@ -7,6 +7,7 @@ from pymss_core.npu_fft import (
     hann_window_npu,
     istft_npu,
     masked_spectrum,
+    numpy_complex_to_device,
     stft_npu,
 )
 
@@ -127,3 +128,18 @@ class TestComplexHostCopy:
         mask = torch.rand(2, 5, 7)
         spec = torch.randn(2, 5, 7)
         assert (masked_spectrum(mask, spec, to_cpu=True) == (mask * spec).numpy()).all()
+
+
+class TestComplexHostUpload:
+    """BIREN rejects complex host->device copies too ('Unsupported BR type')."""
+
+    def test_round_trip_through_planes_is_bit_exact(self):
+        rng = np.random.default_rng(5)
+        array = (rng.standard_normal((2, 5, 7)) + 1j * rng.standard_normal((2, 5, 7))).astype(np.complex64)
+        tensor = numpy_complex_to_device(array, "cpu")
+        assert tensor.dtype == torch.complex64
+        assert torch.equal(tensor, torch.from_numpy(array))
+
+    def test_real_input_takes_the_direct_path(self):
+        array = np.zeros((2, 3), dtype=np.float32)
+        assert numpy_complex_to_device(array, "cpu").dtype == torch.float32

@@ -23,6 +23,8 @@ padding.
 """
 from __future__ import annotations
 
+import numpy as np
+
 import torch
 import torch.nn.functional as F
 
@@ -164,6 +166,30 @@ def istft_npu(
             out = out[..., :length]
             norm = norm[..., :length]
     return out / norm.clamp_min(_TINY)
+
+
+def numpy_complex_to_device(spec: "np.ndarray", device) -> torch.Tensor:
+    """Upload a complex numpy array through its real planes.
+
+    The mirror image of :func:`complex_to_numpy_cpu`: BIREN rejects a complex
+    host->device copy as well, with
+
+        Unsupported BR type for ScalarType: 0
+
+    so the real planes travel and the complex view is rebuilt on the device.
+
+    Args:
+        spec: Complex numpy array.
+        device: Target torch device.
+
+    Returns:
+        A complex tensor on ``device``.
+    """
+    array = np.ascontiguousarray(spec)
+    if not np.iscomplexobj(array):
+        return torch.from_numpy(array).to(device)
+    planes = np.stack((array.real, array.imag), axis=-1).astype(np.float32, copy=False)
+    return torch.view_as_complex(torch.from_numpy(np.ascontiguousarray(planes)).to(device).contiguous())
 
 
 def complex_to_numpy_cpu(spec: torch.Tensor) -> "np.ndarray":
