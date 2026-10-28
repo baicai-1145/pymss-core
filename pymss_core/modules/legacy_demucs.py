@@ -187,8 +187,30 @@ def _pad1d(x, paddings, mode="constant", value=0.0):
         paddings = (left - extra_left, right - extra_right)
         x = F.pad(x, (extra_left, extra_right))
     return F.pad(x, paddings, mode, value)
-def _spectro(x, n_fft=512, hop_length=None, pad=0): *other, length = x.shape; z = torch.stft(x.reshape(-1, length), n_fft * (1 + pad), hop_length or n_fft // 4, window=_hann(n_fft, x), win_length=n_fft, normalized=True, center=True, return_complex=True, pad_mode="reflect"); return z.view(*other, z.shape[-2], z.shape[-1])
-def _ispectro(z, hop_length=None, length=None, pad=0): *other, freqs, frames = z.shape; n_fft = 2 * freqs - 2; x = torch.istft(z.reshape(-1, freqs, frames), n_fft, hop_length, window=_hann(n_fft // (1 + pad), z.real), win_length=n_fft // (1 + pad), normalized=True, length=length, center=True); return x.view(*other, x.shape[-1])
+def _spectro(x, n_fft=512, hop_length=None, pad=0):
+    """ ``torch.stft`` wrapper; vendors without a complex STFT use npu_fft. """
+    from pymss_core.npu_fft import stft_npu, torch_stft_blocked
+    *other, length = x.shape
+    flat = x.reshape(-1, length)
+    n_fft_full = n_fft * (1 + pad)
+    kwargs = dict(hop_length=hop_length or n_fft // 4, window=_hann(n_fft, x), win_length=n_fft, normalized=True, center=True, return_complex=True, pad_mode="reflect")
+    if torch_stft_blocked(x.device):
+        z = stft_npu(flat, n_fft_full, **kwargs)
+    else:
+        z = torch.stft(flat, n_fft_full, **kwargs)
+    return z.view(*other, z.shape[-2], z.shape[-1])
+def _ispectro(z, hop_length=None, length=None, pad=0):
+    """ ``torch.istft`` wrapper; vendors without a complex STFT use npu_fft. """
+    from pymss_core.npu_fft import istft_npu, torch_stft_blocked
+    *other, freqs, frames = z.shape
+    n_fft = 2 * freqs - 2
+    flat = z.reshape(-1, freqs, frames)
+    kwargs = dict(hop_length=hop_length, window=_hann(n_fft // (1 + pad), z.real), win_length=n_fft // (1 + pad), normalized=True, length=length, center=True)
+    if torch_stft_blocked(z.device):
+        x = istft_npu(flat, n_fft, **kwargs)
+    else:
+        x = torch.istft(flat, n_fft, **kwargs)
+    return x.view(*other, x.shape[-1])
 class LegacyHDemucs(nn.Module):
     def __init__(self, sources, audio_channels=2, channels=48, channels_time=None, growth=2, nfft=4096, wiener_iters=0,
                  end_iters=0, wiener_residual=False, cac=True, depth=6, rewrite=True, hybrid=True, hybrid_old=False,

@@ -80,3 +80,46 @@ class TestGluShim:
         x = torch.randn(2, 8, 5)
         assert torch.allclose(F.glu(x, 1), original(x, 1), atol=1e-6)
         reset_shims()
+
+
+class TestScalarOperands:
+    def test_complex_times_python_float(self):
+        from pymss_core.vendor_shims import complex_planes_product
+
+        spec = torch.randn(2, 9, 17, dtype=torch.complex64)
+        assert torch.allclose(complex_planes_product(spec, 0.5), spec * 0.5, atol=1e-6)
+
+    def test_complex_times_python_complex(self):
+        from pymss_core.vendor_shims import complex_planes_product
+
+        spec = torch.randn(2, 9, 17, dtype=torch.complex64)
+        assert torch.allclose(complex_planes_product(spec, 1 - 2j), spec * (1 - 2j), atol=1e-5)
+
+    def test_float_tensor_times_scalar_is_untouched(self):
+        from pymss_core.vendor_shims import _needs_plane_product
+
+        assert _needs_plane_product(torch.randn(3), 2.0) is False
+
+
+class TestScatterAddEquivalent:
+    def test_matches_scatter_add_in_five_dimensions(self):
+        from pymss_core.vendor_shims import scatter_add_equivalent
+
+        torch.manual_seed(0)
+        src = torch.randn(2, 3, 13, 5, 2)
+        index = torch.tensor([0, 0, 1, 2, 2, 3, 4, 4, 4, 5, 6, 6, 1])
+        want = torch.zeros(2, 3, 9, 5, 2)
+        want.scatter_add_(2, index[None, None, :, None, None].expand(2, 3, -1, 5, 2), src)
+        got = scatter_add_equivalent(src, index, 2, 9)
+        assert got.shape == want.shape
+        assert torch.allclose(got, want, atol=1e-6)
+
+    def test_last_dimension(self):
+        from pymss_core.vendor_shims import scatter_add_equivalent
+
+        torch.manual_seed(1)
+        src = torch.randn(4, 6)
+        index = torch.tensor([0, 1, 1, 3, 5, 5])
+        want = torch.zeros(4, 7)
+        want.scatter_add_(1, index[None, :].expand(4, 6), src)
+        assert torch.allclose(scatter_add_equivalent(src, index, 1, 7), want, atol=1e-6)

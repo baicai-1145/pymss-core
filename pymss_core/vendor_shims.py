@@ -21,7 +21,11 @@ import torch
 _installed: set[str] = set()
 
 
-def complex_planes_product(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+def _is_number(value) -> bool:
+    return isinstance(value, (int, float, complex)) and not isinstance(value, bool)
+
+
+def complex_planes_product(a, b) -> torch.Tensor:
     """Multiply with at least one complex operand using only real kernels.
 
     Args:
@@ -31,6 +35,17 @@ def complex_planes_product(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     Returns:
         ``a * b`` with the complex dtype.
     """
+    if _is_number(b):
+        # Scalar operands hit the same missing kernel (``spec * (1/n)**0.5`` in
+        # every normalized STFT), so they are folded into the real planes.
+        planes = torch.view_as_real(a)
+        if isinstance(b, complex):
+            real = planes[..., 0] * b.real - planes[..., 1] * b.imag
+            imag = planes[..., 0] * b.imag + planes[..., 1] * b.real
+            return torch.view_as_complex(torch.stack((real, imag), dim=-1).contiguous())
+        return torch.view_as_complex((planes * b).contiguous())
+    if _is_number(a):
+        return complex_planes_product(b, a)
     if a.is_complex() and b.is_complex():
         ar, ai = a.real, a.imag
         br, bi = b.real, b.imag
@@ -48,15 +63,21 @@ def complex_planes_product(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
 
 def _needs_plane_product(a, b) -> bool:
-    return (
-        isinstance(a, torch.Tensor)
-        and isinstance(b, torch.Tensor)
-        and (a.is_complex() or b.is_complex())
-        and (a.is_complex() or torch.is_floating_point(a))
-        and (b.is_complex() or torch.is_floating_point(b))
-        and not (a.is_complex() and a.dtype != torch.complex64)
-        and not (b.is_complex() and b.dtype != torch.complex64)
-    )
+    if _is_number(a) and _is_number(b):
+        return False
+    tensor = b if _is_number(b) else a
+    if not isinstance(tensor, torch.Tensor) or not tensor.is_complex():
+        return False
+    if tensor.dtype != torch.complex64:
+        return False
+    other = a if _is_number(b) else b
+    if _is_number(other):
+        return True
+    if not isinstance(other, torch.Tensor):
+        return False
+    if other.is_complex():
+        return other.dtype == torch.complex64
+    return torch.is_floating_point(other)
 
 
 def install_complex_mul_shim() -> bool:
@@ -167,6 +188,35 @@ def install_glu_shim() -> bool:
     F.glu = glu
     _installed.add("glu")
     return True
+
+
+def scatter_add_equivalent(src: torch.Tensor, index: torch.Tensor, dim: int, size: int) -> torch.Tensor:
+    """Accumulate ``src`` into ``size`` slots of a new tensor, without scatter.
+
+    ``scatter_add_`` has no kernel on the SUBLAS path
+    (``no valid backend was found for op: ScatterAdd``).  Mel-band models use it
+    to fold band outputs back onto the frequency axis, which is a one-hot
+    matrix multiply: exact, and built from ops the vendor does implement.
+
+    Args:
+        src: Source tensor, shape ``(..., index.numel(), ..., C)`` along ``dim``.
+        index: 1-D integer tensor of target slot per source entry.
+        dim: Dimension of ``src``/the result that the scatter runs along.
+        size: Number of slots in the result.
+
+    Returns:
+        The accumulated tensor with ``size`` slots along ``dim``.
+    """
+    slots = torch.arange(size, device=src.device, dtype=index.dtype)
+    one_hot = (index.unsqueeze(0) == slots.unsqueeze(1)).to(src.dtype)  # (size, numel)
+    moved = src.movedim(dim, -2) if dim >= 0 else src.movedim(dim, -2)
+    leading = moved.shape[:-2]
+    flat = moved.reshape(-1, moved.shape[-2], moved.shape[-1])
+    out = torch.matmul(one_hot, flat)  # (size, numel) x (N, numel, C) -> broadcast per N
+    out = out.reshape(*leading, size, moved.shape[-1])
+    if dim >= 0:
+        return out.movedim(-2, dim)
+    return out.movedim(-2, dim)
 
 
 #: Shim name -> installer.

@@ -121,6 +121,7 @@ class DeviceProfile:
     complex_mul: bool = True
     window_on_device: bool = True
     glu_shim: bool = False
+    scatter_add: bool = True
     dilated_conv_allowed: frozenset[tuple[int, int]] = frozenset()
     amp: bool = True
     amp_dtype: torch.dtype = torch.float16
@@ -195,6 +196,7 @@ _PROFILES: dict[str, DeviceProfile] = {
         amp=False, amp_dtype=torch.bfloat16, dilated_conv=False,
         dilated_conv_allowed=frozenset({(1, 1), (2, 2)}),
         complex_mul=False, window_on_device=False, glu_shim=True,
+        scatter_add=False,
     ),
     MLU: DeviceProfile(MLU, "mlu", plugin="torch_mlu"),
     # Ascend's torch_npu builds ship npu_lstm/npu_gru without inference support
@@ -484,6 +486,11 @@ def prepare_device_alias(alias: str) -> str:
     return device_type
 
 
+def scatter_add_blocked(device=None) -> bool:
+    """Return ``True`` when ``scatter_add_`` has no kernel and must be emulated."""
+    return not device_profile(device).scatter_add
+
+
 def fft_fallback_required(device=None) -> bool:
     """Return ``True`` when ``torch.stft``/``torch.istft`` must be replaced."""
     return device_profile(device).needs_fft_fallback
@@ -581,6 +588,7 @@ __all__ = (
     "autocast_dtype",
     "dilated_conv_blocked",
     "dilated_conv_supported",
+    "scatter_add_blocked",
     "eager_conv_enabled",
     "clear_device_cache",
     "detect_vendor",
