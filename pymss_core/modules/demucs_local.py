@@ -5,7 +5,7 @@ import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
-from pymss_core.npu_fft import istft_npu as _npu_fft_istft, stft_npu as _npu_fft_stft
+from pymss_core.npu_fft import istft_npu as _npu_fft_istft, stft_npu as _npu_fft_stft, torch_stft_blocked
 _HANN_CACHE = {}
 
 
@@ -27,7 +27,7 @@ def pad1d(x, paddings, mode="constant", value=0.0):
 def spectro(x, n_fft=512, hop_length=None, pad=0):
     *other, length = x.shape
     if x.device.type == "mps": x = x.cpu()
-    fn = _npu_fft_stft if x.device.type == "npu" else torch.stft
+    fn = _npu_fft_stft if torch_stft_blocked(x.device) else torch.stft
     z = fn(x.reshape(-1, length), n_fft * (1 + pad), hop_length or n_fft // 4, window=_hann(n_fft, x), win_length=n_fft, normalized=True, center=True, return_complex=True, pad_mode="reflect")
     return z.view(*other, z.shape[-2], z.shape[-1])
 def ispectro(z, hop_length=None, length=None, pad=0):
@@ -35,7 +35,7 @@ def ispectro(z, hop_length=None, length=None, pad=0):
     n_fft = 2 * freqs - 2
     win_length = n_fft // (1 + pad)
     if z.device.type == "mps": z = z.cpu()
-    fn = _npu_fft_istft if z.device.type == "npu" else torch.istft
+    fn = _npu_fft_istft if torch_stft_blocked(z.device) else torch.istft
     x = fn(z.reshape(-1, freqs, frames), n_fft, hop_length, window=_hann(win_length, z.real), win_length=win_length, normalized=True, length=length, center=True)
     return x.view(*other, x.shape[-1])
 def rescale_module(module, reference):

@@ -26,6 +26,8 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
+from pymss_core.device import fft_fallback_required
+
 _VALID_PAD_MODES = ("reflect", "constant")
 _TINY = 1e-11
 
@@ -165,8 +167,14 @@ def istft_npu(
 
 
 def torch_stft_blocked(device) -> bool:
-    """Return True when ``torch.stft`` must be replaced on this device."""
-    return torch.device(device).type == "npu"
+    """Return True when ``torch.stft``/``torch.istft`` must be replaced on this device.
+
+    Delegates to the backend capability profile in :mod:`pymss_core.device`:
+    Ascend lacks a usable complex STFT path, and any other accelerator can opt
+    into the ``torch.fft`` composition while its stack is being validated
+    (``PYMSS_FFT_FALLBACK=1``).
+    """
+    return fft_fallback_required(device)
 
 
 __all__ = ["hann_window_npu", "istft_npu", "stft_npu", "torch_stft_blocked"]

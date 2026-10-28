@@ -50,7 +50,7 @@ def test_cpu_fallback_preserves_packed_and_dense_contract(patched_runtime, monke
     with torch.inference_mode():
         expected, expected_hx = model(input, hx)
     patched_runtime.install_npu_rnn_fallback()
-    monkeypatch.setattr(patched_runtime, "_is_npu_input", lambda value: True)
+    monkeypatch.setattr(patched_runtime, "_needs_cpu_fallback", lambda value: True)
     with torch.inference_mode():
         actual, actual_hx = model(input, hx)
     if packed:
@@ -76,7 +76,7 @@ def test_fallback_does_not_repeat_subclass_forward_or_hooks(patched_runtime, mon
     hooks = []
     handle = model.register_forward_hook(lambda *args: hooks.append(1))
     patched_runtime.install_npu_rnn_fallback()
-    monkeypatch.setattr(patched_runtime, "_is_npu_input", lambda value: True)
+    monkeypatch.setattr(patched_runtime, "_needs_cpu_fallback", lambda value: True)
     with torch.inference_mode():
         actual, _ = model(wave)
     handle.remove()
@@ -100,7 +100,7 @@ def test_reinstall_after_reload_preserves_original_forward(patched_runtime):
 
 def test_npu_fallback_rejects_training_instead_of_detaching_gradients(patched_runtime, monkeypatch):
     patched_runtime.install_npu_rnn_fallback()
-    monkeypatch.setattr(patched_runtime, "_is_npu_input", lambda value: True)
+    monkeypatch.setattr(patched_runtime, "_needs_cpu_fallback", lambda value: True)
     model = nn.GRU(3, 4)
     with pytest.raises(RuntimeError, match="inference"):
         model(torch.randn(5, 2, 3, requires_grad=True))
@@ -123,7 +123,7 @@ def test_cpu_fallback_handles_amp_inputs(patched_runtime, monkeypatch, kind, pac
         expected, expected_hidden = reference(reference_input)
     original_dtype = model.weight_ih_l0.dtype
     patched_runtime.install_npu_rnn_fallback()
-    monkeypatch.setattr(patched_runtime, "_is_npu_input", lambda value: True)
+    monkeypatch.setattr(patched_runtime, "_needs_cpu_fallback", lambda value: True)
     with torch.inference_mode():
         actual, actual_hidden = model(input)
     actual_data = actual.data if packed else actual

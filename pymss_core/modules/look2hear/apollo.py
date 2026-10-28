@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 from torch import nn
-from pymss_core.npu_fft import istft_npu, stft_npu
+from pymss_core.npu_fft import istft_npu, stft_npu, torch_stft_blocked
 from ..mlx_backend import MpsBackendMixin
 from pymss_core.runtime_cache import _clear_cache_dicts
 def _cached_inference_tensor(module, name, tensor, input, version):
@@ -142,9 +142,10 @@ class Apollo(MpsBackendMixin, nn.Module):
     def _use_packed_band_ops(self): return not self.training and not torch.is_grad_enabled() and self._uniform_band_prefix()[0] > 1
     def _stft(self, input):
         B, nch, nsample = input.shape
-        fn = stft_npu if input.device.type == "npu" else torch.stft
+        fft_fallback = torch_stft_blocked(input.device)
+        fn = stft_npu if fft_fallback else torch.stft
         flat = input.view(B * nch, nsample)
-        if input.device.type == "npu": flat = flat.float()
+        if fft_fallback: flat = flat.float()
         return fn(flat, n_fft=self.win, hop_length=self.stride, window=self._window(input), return_complex=True)
     def _band_norm_power(self, spec, band_idx, width):
         this_spec = spec[:, band_idx : band_idx + width]
@@ -218,5 +219,5 @@ class Apollo(MpsBackendMixin, nn.Module):
         B, nch, nsample = input.shape
         feature = self.net(self.feature_extractor(input))
         est_spec = self._estimate_spec_packed(feature, B * nch) if self._use_packed_band_ops() else self._estimate_spec_by_band(feature, B * nch)
-        istft_fn = istft_npu if input.device.type == "npu" else torch.istft
+        istft_fn = istft_npu if torch_stft_blocked(input.device) else torch.istft
         return istft_fn(est_spec.to(dtype=torch.complex64), n_fft=self.win, hop_length=self.stride, window=self._window(input), length=nsample).view(B, nch, -1)

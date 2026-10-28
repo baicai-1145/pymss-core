@@ -10,13 +10,15 @@ weights are small relative to the surrounding convolutional/transformer
 blocks, so the transfer cost keeps inference usable on affected builds.
 Autograd on NPU recurrent modules is not supported by this fallback.
 
-Enabled via ``pymss_core.npu_rnn.install_npu_rnn_fallback()``.
+Enabled via ``pymss_core.npu_rnn.install_rnn_cpu_fallback()`` (formerly
+``install_npu_rnn_fallback``).
 """
 from __future__ import annotations
 
 from functools import wraps
 
 import torch
+from pymss_core.device import rnn_fallback_required
 from torch import nn
 from torch.nn.utils.rnn import PackedSequence
 
@@ -55,15 +57,15 @@ class _NpuRnnCpuFallback(nn.Module):
         return output.to(device=out_device, dtype=input_dtype), hidden
 
 
-def _is_npu_input(input):
+def _needs_cpu_fallback(input):
     tensor = input.data if isinstance(input, PackedSequence) else input
-    return isinstance(tensor, torch.Tensor) and tensor.device.type == "npu"
+    return isinstance(tensor, torch.Tensor) and rnn_fallback_required(tensor.device)
 
 
 def _patched_rnn_forward(original_forward):
     @wraps(original_forward)
     def forward(self, input, hx=None):
-        if not _is_npu_input(input):
+        if not _needs_cpu_fallback(input):
             return original_forward(self, input) if hx is None else original_forward(self, input, hx)
         return _NpuRnnCpuFallback(self, original_forward)(input, hx)
 
@@ -71,8 +73,13 @@ def _patched_rnn_forward(original_forward):
     return forward
 
 
-def install_npu_rnn_fallback():
-    """Patch recurrent forwards for NPU inference; native CPU/CUDA paths stay intact."""
+def install_rnn_cpu_fallback():
+    """Patch recurrent forwards wherever the backend lacks native RNN kernels.
+
+    Covers Ascend NPU (``npu_lstm``/``npu_gru`` are inference-incomplete) and any
+    other accelerator whose profile reports ``rnn=False``; native paths on other
+    devices are untouched.
+    """
     global _installed
     if _installed:
         return
@@ -80,3 +87,8 @@ def install_npu_rnn_fallback():
         original = getattr(cls.forward, "_pymss_npu_original_forward", cls.forward)
         cls.forward = _patched_rnn_forward(original)
     _installed = True
+
+
+def install_npu_rnn_fallback():
+    """Deprecated alias for :func:`install_rnn_cpu_fallback`."""
+    install_rnn_cpu_fallback()
