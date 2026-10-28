@@ -115,6 +115,8 @@ class OverlappingMaskEstimationModule(MaskEstimationModuleBase):
                 # Accumulate in real/imaginary space: complex zeros cannot be
                 # allocated on BIREN. Real masks join with a trailing singleton.
                 mask = torch.view_as_real(mask.contiguous()) if mask.is_complex() else mask.unsqueeze(-1)
+            if os.environ.get("PYMSS_DEBUG_MASKS"):
+                print(f"      after real/imag: {tuple(mask.shape)} {mask.dtype}", flush=True)
             # F.pad maps to a padding kernel BIREN rejects ('Unsupported BR type for
             # ScalarType: 0'); cat of zeros is the same and always works. Padding is
             # unconditional so no band can skip the alignment.
@@ -122,6 +124,12 @@ class OverlappingMaskEstimationModule(MaskEstimationModuleBase):
             tail = mask.shape[4:]
             left = mask.new_zeros(b_, c_, fstart, t_, *tail)
             right = mask.new_zeros(b_, c_, self.n_freq - fend, t_, *tail)
+            if os.environ.get("PYMSS_DEBUG_MASKS"):
+                print(
+                    f"      left={tuple(left.shape)} mask={tuple(mask.shape)} right={tuple(right.shape)}"
+                    f" b_={b_} c_={c_} t_={t_} tail={tuple(tail)}",
+                    flush=True,
+                )
             mask = torch.cat((left, mask, right), dim=2)
             if total is not None and mask.shape != total.shape:
                 if mask.dim() == total.dim() - 1:
