@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import pytest
 import torch
 
@@ -17,9 +19,11 @@ from pymss_core.device import (
     NVIDIA,
     ROCM,
     amp_supported,
+    apply_vendor_env,
     autocast_dtype,
     clear_device_cache,
     rnn_op_blocked,
+    vendor_env_defaults,
     detect_vendor,
     fft_fallback_required,
     prepare_device_alias,
@@ -212,3 +216,38 @@ def test_forced_vendor_does_not_reclassify_host_devices(monkeypatch):
     assert device_profile("cpu").rnn is True
     assert device_profile("cpu").needs_rnn_fallback is False
     clear_device_cache()
+
+
+def test_biren_vendor_env_is_applied_before_the_plugin_import(monkeypatch):
+    """The SUDNN heuristic search costs ~220 s per new conv shape; skip it."""
+    monkeypatch.delenv("BRTB_ENABLE_FORCE_EAGER_CONV2D", raising=False)
+    monkeypatch.delenv("BRTB_ENABLE_FORCE_EAGER_CONV2DTRANSPOSE", raising=False)
+    monkeypatch.delenv("PYMSS_VENDOR_ENV", raising=False)
+    clear_device_cache()
+
+    expected = {"BRTB_ENABLE_FORCE_EAGER_CONV2D": "1", "BRTB_ENABLE_FORCE_EAGER_CONV2DTRANSPOSE": "1"}
+    assert vendor_env_defaults("biren") == expected
+    assert apply_vendor_env("biren") == expected
+    assert os.environ["BRTB_ENABLE_FORCE_EAGER_CONV2D"] == "1"
+
+
+def test_vendor_env_does_not_override_user_choices(monkeypatch):
+    monkeypatch.setenv("BRTB_ENABLE_FORCE_EAGER_CONV2D", "0")
+    monkeypatch.delenv("BRTB_ENABLE_FORCE_EAGER_CONV2DTRANSPOSE", raising=False)
+    monkeypatch.delenv("PYMSS_VENDOR_ENV", raising=False)
+    assert apply_vendor_env("biren") == {"BRTB_ENABLE_FORCE_EAGER_CONV2DTRANSPOSE": "1"}
+    assert os.environ["BRTB_ENABLE_FORCE_EAGER_CONV2D"] == "0"
+
+
+def test_vendor_env_can_be_disabled(monkeypatch):
+    monkeypatch.delenv("BRTB_ENABLE_FORCE_EAGER_CONV2D", raising=False)
+    monkeypatch.delenv("BRTB_ENABLE_FORCE_EAGER_CONV2DTRANSPOSE", raising=False)
+    monkeypatch.setenv("PYMSS_VENDOR_ENV", "0")
+    assert apply_vendor_env("biren") == {}
+    assert "BRTB_ENABLE_FORCE_EAGER_CONV2D" not in os.environ
+
+
+def test_vendor_env_is_empty_for_other_vendors(monkeypatch):
+    monkeypatch.delenv("PYMSS_VENDOR_ENV", raising=False)
+    assert vendor_env_defaults("nvidia") == {}
+    assert apply_vendor_env("cuda") == {}

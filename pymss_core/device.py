@@ -333,6 +333,66 @@ def requires_plugin(alias: str) -> str | None:
     return profile.plugin if profile else None
 
 
+#: Defaults applied to ``os.environ`` *before* the vendor extension is imported.
+#:
+#: BIREN's SUDNN spends ~220 s choosing a kernel for a new convolution shape on
+#: a 1025x860 spectrogram, while the steady-state kernel takes 10-15 ms.  pymss
+#: feeds it a new shape for every audio chunk, so the search dominates.
+#:
+#: Measured on BIREN106M / torch-br 1.7.0.20700, one 3x3 fp32 conv on
+#: (2,32,1025,860), timeout 75 s per candidate:
+#:
+#: ==============================  ===========  ==========
+#: setting                         first call   steady
+#: ==============================  ===========  ==========
+#: default (SUDNN search)          >75 000 ms   14.9 ms
+#: ``BRTB_DISABLE_HEURISTIC_SEARCH`` >75 000 ms    -
+#: ``BRTB_ENABLE_BUILD_CACHE``     >75 000 ms    -
+#: ``BRTB_ENABLE_OP_FRONTEND_CACHE`` >75 000 ms   -
+#: ``BRTB_ENABLE_FAST_MAKE_KERNEL_KEY`` >75 000 ms -
+#: ``BRTB_ENABLE_FORCE_EAGER_CONV2D`` 1 790 ms   21.0 ms
+#: ==============================  ===========  ==========
+#:
+#: The eager path is ~40% slower per call in steady state but removes a per-shape
+#: search that costs minutes, so it is the default.  Values set by the user are
+#: never overwritten; ``PYMSS_VENDOR_ENV=0`` disables the whole mechanism.
+_VENDOR_ENV_DEFAULTS: dict[str, dict[str, str]] = {
+    BIREN: {
+        "BRTB_ENABLE_FORCE_EAGER_CONV2D": "1",
+        "BRTB_ENABLE_FORCE_EAGER_CONV2DTRANSPOSE": "1",
+    },
+}
+
+
+def vendor_env_defaults(vendor: str) -> dict[str, str]:
+    """Return the environment defaults pymss applies for ``vendor``."""
+    return dict(_VENDOR_ENV_DEFAULTS.get(vendor, {}))
+
+
+def apply_vendor_env(device_or_vendor) -> dict[str, str]:
+    """Apply :data:`_VENDOR_ENV_DEFAULTS` for a device or vendor key.
+
+    Must run before the vendor extension is imported, because the backend reads
+    these switches when it builds its kernels.
+
+    Args:
+        device_or_vendor: Vendor key (``"biren"``) or any device spec.
+
+    Returns:
+        The variables that were set, for logging.
+    """
+    vendor = device_or_vendor if device_or_vendor in _PROFILES else detect_vendor(_device_type_of(device_or_vendor))
+    if _env_flag("PYMSS_VENDOR_ENV") is False:
+        return {}
+    applied: dict[str, str] = {}
+    for name, value in vendor_env_defaults(vendor).items():
+        if os.environ.get(name):
+            continue
+        os.environ[name] = value
+        applied[name] = value
+    return applied
+
+
 def prepare_device_alias(alias: str) -> str:
     """Import the vendor extension for ``alias`` and return the device type.
 
@@ -351,6 +411,8 @@ def prepare_device_alias(alias: str) -> str:
     if profile is None:
         return str(alias)
     if profile.plugin:
+        # The backend reads its tuning switches when the extension loads.
+        apply_vendor_env(profile.vendor)
         __import__(profile.plugin)
     clear_device_cache()
     device_type = profile.device_type
@@ -442,6 +504,7 @@ __all__ = (
     "NVIDIA",
     "ROCM",
     "amp_supported",
+    "apply_vendor_env",
     "autocast_dtype",
     "dilated_conv_blocked",
     "dilated_conv_supported",
@@ -454,4 +517,5 @@ __all__ = (
     "requires_plugin",
     "rnn_fallback_required",
     "rnn_op_blocked",
+    "vendor_env_defaults",
 )
