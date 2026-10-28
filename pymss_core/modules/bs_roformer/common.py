@@ -161,7 +161,13 @@ def istft_roformer(module, stft_repr, context, length):
             .permute(0, 1, 3, 2, 4, 5)
             .reshape(b * n * context.channels, context.freq_bins, t, 2).contiguous())
     stft_repr = torch.view_as_complex(real)
-    if getattr(module, "zero_dc", False): stft_repr[:, 0] = 0.0
+    if getattr(module, "zero_dc", False):
+        # In-place assignment on a complex tensor is not usable on every vendor
+        # (BIREN: "devToAccess -1 is not a device"), so the DC bin is replaced
+        # functionally instead.
+        planes = torch.view_as_real(stft_repr)
+        planes = torch.cat((torch.zeros_like(planes[:, :1]), planes[:, 1:]), dim=1)
+        stft_repr = torch.view_as_complex(planes.contiguous())
     if context.x_is_npu:
         recon_audio = istft_npu(stft_repr, **module.stft_kwargs, window=context.stft_window, return_complex=False, length=length)
     else:
