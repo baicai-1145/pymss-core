@@ -224,3 +224,27 @@ class TestInterpolateShim:
         x = torch.randn(1, 2, 4, 4).bfloat16()
         assert F.interpolate(x, scale_factor=2, mode="nearest").dtype == torch.bfloat16
         reset_shims()
+
+
+class TestGroupedConv1d:
+    """BIREN rejects 1 < groups < in_channels with '801, operation not supported'."""
+
+    @pytest.mark.parametrize(("groups", "cin", "cout"), [(4, 8, 16), (8, 32, 16), (2, 6, 4)])
+    def test_split_matches_the_grouped_convolution(self, groups, cin, cout):
+        import torch.nn.functional as F
+
+        from pymss_core.vendor_shims import conv1d_grouped_equivalent
+
+        torch.manual_seed(0)
+        x = torch.randn(2, cin, 21)
+        w = torch.randn(cout, cin // groups, 3)
+        b = torch.randn(cout)
+        ref = F.conv1d(x, w, b, 1, 1, 1, groups)
+        got = conv1d_grouped_equivalent(x, w, b, 1, 1, 1, groups)
+        assert torch.equal(got, ref)
+
+    def test_biren_profile_asks_for_it(self):
+        from pymss_core.device import clear_device_cache, device_profile
+
+        clear_device_cache()
+        assert device_profile("supa").grouped_conv1d is True

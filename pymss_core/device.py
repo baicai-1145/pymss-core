@@ -124,6 +124,7 @@ class DeviceProfile:
     glu_shim: bool = False
     group_norm_shim: bool = False
     interpolate_shim: bool = False
+    grouped_conv1d: bool = False
     scatter_add: bool = True
     dilated_conv_allowed: frozenset[tuple[int, int]] = frozenset()
     amp: bool = True
@@ -198,7 +199,7 @@ _PROFILES: dict[str, DeviceProfile] = {
         amp=True, amp_dtype=torch.bfloat16, dilated_conv=False,
         dilated_conv_allowed=frozenset({(1, 1), (2, 2)}),
         complex_mul=False, complex_reshape=False, window_on_device=False, glu_shim=True,
-        group_norm_shim=True, interpolate_shim=True,
+        group_norm_shim=True, interpolate_shim=True, grouped_conv1d=True,
         scatter_add=False,
     ),
     MLU: DeviceProfile(MLU, "mlu", plugin="torch_mlu"),
@@ -488,6 +489,7 @@ def prepare_device_alias(alias: str) -> str:
         glu=profile_now.glu_shim,
         group_norm=profile_now.group_norm_shim,
         interpolate=profile_now.interpolate_shim,
+        conv1d=profile_now.grouped_conv1d,
     )
     return device_type
 

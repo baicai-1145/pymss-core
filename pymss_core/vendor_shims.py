@@ -374,6 +374,84 @@ def install_interpolate_shim() -> bool:
     return True
 
 
+def conv1d_grouped_equivalent(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    stride=1,
+    padding=0,
+    dilation=1,
+    groups: int = 1,
+) -> torch.Tensor:
+    """``F.conv1d`` with ``groups`` run as one conv per group (exact).
+
+    BIREN rejects grouped conv1d whenever ``1 < groups < in_channels``:
+
+        Conv1d.cpp:120 SUPA Kernel Launch Error, ErrorCode: 801
+
+    while plain (``groups=1``) and depthwise (``groups == in_channels``) work, so
+    the grouped case is split per group and concatenated.
+
+    Args:
+        input: Input tensor ``(N, C_in, L)``.
+        weight: Kernel ``(C_out, C_in / groups, k)``.
+        bias: Optional ``(C_out,)`` bias.
+        stride: Convolution stride.
+        padding: Convolution padding.
+        dilation: Convolution dilation.
+        groups: Number of groups.
+
+    Returns:
+        The concatenated per-group results.
+    """
+    import torch.nn.functional as F
+
+    in_per_group = input.shape[1] // groups
+    out_per_group = weight.shape[0] // groups
+    outputs = []
+    for index in range(groups):
+        in_slice = slice(index * in_per_group, (index + 1) * in_per_group)
+        out_slice = slice(index * out_per_group, (index + 1) * out_per_group)
+        outputs.append(
+            F.conv1d(
+                input[:, in_slice],
+                weight[out_slice],
+                None if bias is None else bias[out_slice],
+                stride,
+                padding,
+                dilation,
+                1,
+            )
+        )
+    return torch.cat(outputs, dim=1)
+
+
+def install_conv1d_shim() -> bool:
+    """Split grouped ``F.conv1d`` calls on vendor devices.
+
+    Returns:
+        ``True`` when the shim was installed, ``False`` when it already was.
+    """
+    if "conv1d" in _installed:
+        return False
+    import torch.nn.functional as F
+
+    original = F.conv1d
+
+    def conv1d(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1):
+        in_channels = input.shape[1] if input.dim() > 1 else 0
+        device = getattr(input, "device", None)
+        grouped = 1 < groups < in_channels
+        if not grouped or device is None or device.type in ("cpu", "meta"):
+            return original(input, weight, bias, stride, padding, dilation, groups)
+        return conv1d_grouped_equivalent(input, weight, bias, stride, padding, dilation, groups)
+
+    conv1d._vendor_shim = True
+    F.conv1d = conv1d
+    _installed.add("conv1d")
+    return True
+
+
 #: Shim name -> installer.
 SHIMS = {
     "complex_mul": install_complex_mul_shim,
@@ -382,6 +460,7 @@ SHIMS = {
     "glu": install_glu_shim,
     "group_norm": install_group_norm_shim,
     "interpolate": install_interpolate_shim,
+    "conv1d": install_conv1d_shim,
 }
 
 
@@ -394,6 +473,7 @@ def install_vendor_shims(
     complex_reshape: bool = True,
     group_norm: bool = True,
     interpolate: bool = True,
+    conv1d: bool = False,
 ) -> list[str]:
     """Install the shims a device profile asks for.
 
@@ -405,6 +485,7 @@ def install_vendor_shims(
         complex_reshape: ``False`` when complex tensors cannot be reshaped.
         group_norm: ``True`` when ``F.group_norm`` should be replaced.
         interpolate: ``True`` when bf16 interpolation must run in fp32.
+        conv1d: ``False`` when grouped conv1d must be split per group.
 
     Returns:
         The shim names that were installed by this call.
@@ -424,6 +505,8 @@ def install_vendor_shims(
         wanted.append("group_norm")
     if interpolate:
         wanted.append("interpolate")
+    if conv1d:
+        wanted.append("conv1d")
     installed = []
     for name in wanted:
         if SHIMS[name]():
