@@ -99,6 +99,27 @@ def vendor_fft_trusted(n: int, device=None) -> bool:
     return cached
 
 
+def _degenerate(out: torch.Tensor, source: torch.Tensor) -> bool:
+    """Return ``True`` when the vendor answered with a silent zero tensor.
+
+    BIREN's FFT returns zeros for some shapes without raising (a 513-bin,
+    1024-point inverse transform is one), so every vendor result is checked
+    before it is trusted.  A zero result from a zero input is legitimate.
+
+    Args:
+        out: Vendor FFT result (real or complex).
+        source: Its input.
+
+    Returns:
+        ``True`` when the answer looks like a silent failure.
+    """
+    out_planes = torch.view_as_real(out) if out.is_complex() else out
+    if float(out_planes.abs().max()) != 0.0:
+        return False
+    src_planes = torch.view_as_real(source) if source.is_complex() else source
+    return float(src_planes.abs().max()) != 0.0
+
+
 def _dft_matrices(n: int, device, dtype) -> tuple[torch.Tensor, torch.Tensor]:
     """Return the cached ``cos``/``sin`` DFT basis for length ``n``."""
     key = (n, str(device), dtype)
@@ -201,6 +222,8 @@ def stft_npu(
     frames_flat = frames.squeeze(1)
     if vendor_fft_trusted(n_fft, frames_flat.device):
         spec = torch.fft.rfft(frames_flat, dim=-1)  # (N, T, F)
+        if _degenerate(spec, frames_flat):
+            spec = _rfft_matmul(frames_flat, n_fft)
     else:
         spec = _rfft_matmul(frames_flat, n_fft)
     if normalized:
@@ -249,6 +272,8 @@ def istft_npu(
     flat_spec = torch.view_as_complex(torch.view_as_real(flat_spec).permute(0, 2, 1, 3).contiguous())  # (N, T, F)
     if vendor_fft_trusted(n_fft, flat_spec.device):
         frames = torch.fft.irfft(flat_spec, n=n_fft, dim=-1)  # (N, T, n_fft)
+        if _degenerate(frames, flat_spec):
+            frames = _irfft_matmul(flat_spec, n_fft)
     else:
         frames = _irfft_matmul(flat_spec, n_fft)
     frames = frames * window

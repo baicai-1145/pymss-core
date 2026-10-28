@@ -83,14 +83,16 @@ class OverlappingMaskEstimationModule(MaskEstimationModuleBase):
         mask_list = self.compute_masks(q) if self.compute_all_masks else None
         dtype = torch.complex64 if self.output_dtype == "complex64" else mask_list[0].dtype
         if dtype == torch.complex64 and q.device.type == "npu":
-            # torch_npu cannot zero-fill complex64 directly; build from real parts.
+            # torch_npu/supa cannot zero-fill complex64 directly; build from real parts.
             masks = torch.view_as_complex(torch.zeros(b, self.in_channels, self.n_freq, t, 2, device=q.device, dtype=torch.float32))
         else:
             masks = torch.zeros(b, self.in_channels, self.n_freq, t, device=q.device, dtype=dtype)
-        # BIREN cannot write into tensor slices in place, so each band is
-        # zero-padded to the full frequency axis and summed instead; the bands may
-        # overlap, which makes padding-and-adding the exact equivalent.
+        # BIREN cannot write into tensor slices in place (and cannot allocate a
+        # complex zero tensor either), so each band is zero-padded to the full
+        # frequency axis and summed in real/imaginary space; the bands may overlap,
+        # which makes padding-and-adding the exact equivalent of the slice add.
         total = None
+        total_is_complex = False
         for im in range(n_bands):
             fstart, fend = self.band_specs[im]
             mask = mask_list[im] if mask_list is not None else self.compute_mask(q, im)
@@ -98,16 +100,20 @@ class OverlappingMaskEstimationModule(MaskEstimationModuleBase):
             if mask.shape[2] != fend - fstart or fend > self.n_freq:
                 total = None
                 break
+            if mask.is_complex():
+                total_is_complex = True
+                mask = torch.view_as_real(mask.contiguous())
             if fstart or fend < self.n_freq:
                 # F.pad maps to a padding kernel BIREN rejects ('Unsupported BR type
                 # for ScalarType: 0'); cat of zeros is the same and always works.
-                b_, c_, _, t_ = mask.shape
-                left = mask.new_zeros(b_, c_, fstart, t_)
-                right = mask.new_zeros(b_, c_, self.n_freq - fend, t_)
+                b_, c_, _, t_ = mask.shape[:4]
+                tail = mask.shape[4:]
+                left = mask.new_zeros(b_, c_, fstart, t_, *tail)
+                right = mask.new_zeros(b_, c_, self.n_freq - fend, t_, *tail)
                 mask = torch.cat((left, mask, right), dim=2)
             total = mask if total is None else total + mask
         if total is not None:
-            masks = total
+            masks = torch.view_as_complex(total.contiguous()) if total_is_complex else total
         return masks
 class MaskEstimationModule(OverlappingMaskEstimationModule):
     def __init__(self, band_specs, emb_dim, mlp_dim, in_channels=None, in_channel=None, hidden_activation="Tanh", hidden_activation_kwargs=None, complex_mask=True, **kwargs):

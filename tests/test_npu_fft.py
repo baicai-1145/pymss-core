@@ -178,3 +178,22 @@ class TestExactDftFallback:
         got = stft_npu(x, 16, 4, window=torch.hann_window(16))
         want = torch.stft(x.reshape(-1, 64), 16, 4, window=torch.hann_window(16), return_complex=True)
         assert torch.allclose(got, want, atol=2e-3)
+
+
+class TestDegenerateVendorResult:
+    """A silent all-zero vendor answer must be detected, not trusted."""
+
+    def test_zero_output_from_nonzero_input_is_degenerate(self):
+        from pymss_core.npu_fft import _degenerate
+
+        assert _degenerate(torch.zeros(2, 3, 8), torch.randn(2, 3, 5)) is True
+
+    def test_zero_input_is_not_degenerate(self):
+        from pymss_core.npu_fft import _degenerate
+
+        assert _degenerate(torch.zeros(2, 3, 8), torch.zeros(2, 3, 5)) is False
+
+    def test_nonzero_output_is_fine(self):
+        from pymss_core.npu_fft import _degenerate
+
+        assert _degenerate(torch.ones(2, 3), torch.ones(2, 3)) is False
