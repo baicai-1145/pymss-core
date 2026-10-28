@@ -98,6 +98,13 @@ class OverlappingMaskEstimationModule(MaskEstimationModuleBase):
         for im in range(n_bands):
             fstart, fend = self.band_specs[im]
             mask = mask_list[im] if mask_list is not None else self.compute_mask(q, im)
+            if os.environ.get("PYMSS_DEBUG_MASKS"):
+                print(
+                    f"    band {im} spec=({fstart},{fend}) raw_mask={tuple(mask.shape)} {mask.dtype}"
+                    f" from_list={mask_list is not None} q={tuple(q.shape)} {q.dtype}"
+                    f" in_channels={self.in_channels} n_freq={self.n_freq}",
+                    flush=True,
+                )
             if self.use_freq_weights: mask = mask * self.get_buffer(f'freq_weights/{im}')[:, None]
             if mask.shape[2] != fend - fstart or fend > self.n_freq:
                 total = None
@@ -121,8 +128,6 @@ class OverlappingMaskEstimationModule(MaskEstimationModuleBase):
                     mask = mask.unsqueeze(-1)
                 elif mask.dim() == total.dim() + 1:
                     total = total.unsqueeze(-1)
-            if os.environ.get("PYMSS_DEBUG_MASKS"):
-                print(f"    band {im} spec=({fstart},{fend}) mask={tuple(mask.shape)} {mask.dtype} total={None if total is None else (tuple(total.shape), total.dtype)}", flush=True)
             total = mask if total is None else total + mask
         if total is not None:
             masks = torch.view_as_complex(total.contiguous()) if total_is_complex else total
