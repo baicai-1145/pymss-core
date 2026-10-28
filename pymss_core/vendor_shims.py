@@ -525,6 +525,61 @@ def install_fft_shim() -> bool:
     return True
 
 
+def std_equivalent(x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
+    """``Tensor.std`` rebuilt from ``var``.
+
+    BIREN's ``std`` fails with ``SUPA Kernel Launch Error`` inside std.cpp for
+    shapes that legacy_v3_demucs uses:
+
+        std.cpp:38 SUPA Kernel Launch Error
+
+    The variance kernel works, so the standard deviation is its square root.
+    ``dim``/``keepdim``/``unbiased``/``correction`` are forwarded unchanged.
+
+    Args:
+        x: Input tensor.
+        *args: Positional arguments of ``Tensor.std``.
+        **kwargs: Keyword arguments of ``Tensor.std``.
+
+    Returns:
+        The standard deviation.
+    """
+    dim = kwargs.pop("dim", args[0] if args else None)
+    if len(args) > 1:
+        unbiased = args[1]
+    else:
+        unbiased = kwargs.pop("unbiased", True)
+    keepdim = kwargs.pop("keepdim", args[2] if len(args) > 2 else False)
+    correction = kwargs.pop("correction", None)
+    kwargs.pop("out", None)
+    if correction is not None:
+        var = torch.var(x, dim=dim, correction=correction, keepdim=keepdim)
+    else:
+        var = torch.var(x, dim=dim, unbiased=unbiased, keepdim=keepdim)
+    return torch.sqrt(var.clamp_min(0))
+
+
+def install_std_shim() -> bool:
+    """Replace ``Tensor.std`` on vendor devices.
+
+    Returns:
+        ``True`` when the shim was installed, ``False`` when it already was.
+    """
+    if "std" in _installed:
+        return False
+    original = torch.Tensor.std
+
+    def std(self, *args, **kwargs):
+        if self.device.type in ("cpu", "meta"):
+            return original(self, *args, **kwargs)
+        return std_equivalent(self, *args, **kwargs)
+
+    std._vendor_shim = True
+    torch.Tensor.std = std
+    _installed.add("std")
+    return True
+
+
 #: Shim name -> installer.
 SHIMS = {
     "complex_mul": install_complex_mul_shim,
@@ -536,6 +591,7 @@ SHIMS = {
     "conv1d": install_conv1d_shim,
     "complex_cat": install_complex_cat_shim,
     "fft": install_fft_shim,
+    "std": install_std_shim,
 }
 
 
@@ -551,6 +607,7 @@ def install_vendor_shims(
     conv1d: bool = False,
     complex_cat: bool = False,
     fft: bool = False,
+    std: bool = False,
 ) -> list[str]:
     """Install the shims a device profile asks for.
 
@@ -565,6 +622,7 @@ def install_vendor_shims(
         conv1d: ``False`` when grouped conv1d must be split per group.
         complex_cat: ``True`` when complex ``torch.cat`` must go via the planes.
         fft: ``True`` when ``torch.fft.rfft``/``irfft`` must be replaced.
+        std: ``True`` when ``Tensor.std`` must be rebuilt from ``var``.
 
     Returns:
         The shim names that were installed by this call.
@@ -590,6 +648,8 @@ def install_vendor_shims(
         wanted.append("complex_cat")
     if fft:
         wanted.append("fft")
+    if std:
+        wanted.append("std")
     installed = []
     for name in wanted:
         if SHIMS[name]():

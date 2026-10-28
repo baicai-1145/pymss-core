@@ -289,3 +289,20 @@ class TestComplexCat:
         install_complex_cat_shim()
         assert torch.equal(torch.cat([a, b], dim=1), want)
         reset_shims()
+
+
+class TestStdEquivalent:
+    """std.cpp answers 'SUPA Kernel Launch Error' for legacy_v3_demucs' shapes."""
+
+    @pytest.mark.parametrize(
+        ("dim", "keepdim", "unbiased"),
+        [(-1, True, True), ((1, 2, 3), True, False), (1, False, True), (None, False, False)],
+    )
+    def test_matches_torch_std(self, dim, keepdim, unbiased):
+        from pymss_core.vendor_shims import std_equivalent
+
+        torch.manual_seed(0)
+        x = torch.randn(2, 3, 4, 5)
+        want = x.std(dim=dim, keepdim=keepdim, unbiased=unbiased)
+        got = std_equivalent(x, dim=dim, keepdim=keepdim, unbiased=unbiased)
+        assert torch.allclose(got, want, atol=1e-6)
