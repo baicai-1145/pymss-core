@@ -129,20 +129,68 @@ def install_window_shim() -> bool:
     return True
 
 
+def glu_equivalent(x: torch.Tensor, dim: int = -1) -> torch.Tensor:
+    """Return ``F.glu(x, dim)`` using only elementwise kernels.
+
+    ``a * sigmoid(b)`` is exactly what GLU computes; the fused kernel is missing
+    on the SUBLAS path (``no valid backend was found for op: glu``).
+
+    Args:
+        x: Input tensor whose ``dim`` splits into two halves.
+        dim: Dimension to split on.
+
+    Returns:
+        The gated tensor.
+    """
+    a, b = x.chunk(2, dim=dim)
+    return a * torch.sigmoid(b)
+
+
+def install_glu_shim() -> bool:
+    """Replace ``F.glu`` with the elementwise equivalent.
+
+    Returns:
+        ``True`` when the shim was installed, ``False`` when it already was.
+    """
+    if "glu" in _installed:
+        return False
+    import torch.nn.functional as F
+
+    original = F.glu
+
+    def glu(input, dim=-1):
+        if getattr(input, "device", torch.device("cpu")).type in ("cpu", "meta"):
+            return original(input, dim)
+        return glu_equivalent(input, dim)
+
+    glu._vendor_shim = True
+    F.glu = glu
+    _installed.add("glu")
+    return True
+
+
 #: Shim name -> installer.
 SHIMS = {
     "complex_mul": install_complex_mul_shim,
     "window": install_window_shim,
+    "glu": install_glu_shim,
 }
 
 
-def install_vendor_shims(device_type: str, *, complex_mul: bool = True, window_on_device: bool = True) -> list[str]:
+def install_vendor_shims(
+    device_type: str,
+    *,
+    complex_mul: bool = True,
+    window_on_device: bool = True,
+    glu: bool = True,
+) -> list[str]:
     """Install the shims a device profile asks for.
 
     Args:
         device_type: Device type string, e.g. ``"supa"``.
         complex_mul: ``False`` when the backend has no ``complex * real`` kernel.
         window_on_device: ``False`` when windows cannot be built on the device.
+        glu: ``True`` when ``F.glu`` should be replaced by its elementwise form.
 
     Returns:
         The shim names that were installed by this call.
@@ -154,6 +202,8 @@ def install_vendor_shims(device_type: str, *, complex_mul: bool = True, window_o
         wanted.append("complex_mul")
     if not window_on_device:
         wanted.append("window")
+    if glu:
+        wanted.append("glu")
     installed = []
     for name in wanted:
         if SHIMS[name]():
