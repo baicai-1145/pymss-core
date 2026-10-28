@@ -332,3 +332,26 @@ class TestCpuCopy:
         install_cpu_shim()
         assert torch.equal(x.cpu(), x.clone())
         reset_shims()
+
+
+class TestCpuCopyComplex:
+    """Complex host copies fail with 'ErrorCode: 101, invalid device'."""
+
+    def test_complex_copy_preserves_values(self):
+        from pymss_core.vendor_shims import install_cpu_shim, reset_shims
+
+        reset_shims()
+        x = torch.complex(torch.randn(2, 3), torch.randn(2, 3))
+        assert torch.equal(x.cpu(), x)
+        reset_shims()
+
+    def test_non_contiguous_complex_copy(self):
+        from pymss_core.vendor_shims import install_cpu_shim, reset_shims
+
+        reset_shims()
+        base = torch.complex(torch.randn(4, 6), torch.randn(4, 6))
+        view = base[:, ::2]
+        assert not view.is_contiguous()
+        install_cpu_shim()
+        assert torch.equal(view.cpu(), view.clone())
+        reset_shims()

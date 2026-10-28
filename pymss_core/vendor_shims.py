@@ -576,9 +576,16 @@ def install_cpu_shim() -> bool:
     original = torch.Tensor.cpu
 
     def cpu(self, *args, **kwargs):
-        if self.device.type in ("cpu", "meta") or self.is_contiguous():
+        if self.device.type in ("cpu", "meta"):
             return original(self, *args, **kwargs)
-        return original(self.contiguous(), *args, **kwargs)
+        if self.is_complex():
+            # A complex host copy is also refused ("ErrorCode: 101, invalid
+            # device"); the real/imaginary planes copy fine and rebuild here.
+            planes = original(self.view_as_real().contiguous(), *args, **kwargs)
+            return torch.view_as_complex(planes)
+        if not self.is_contiguous():
+            return original(self.contiguous(), *args, **kwargs)
+        return original(self, *args, **kwargs)
 
     cpu._vendor_shim = True
     torch.Tensor.cpu = cpu
