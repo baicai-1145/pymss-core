@@ -24,6 +24,7 @@ padding.
 from __future__ import annotations
 
 import math
+import os
 
 import numpy as np
 
@@ -40,8 +41,12 @@ def hann_window_npu(window_length: int, *, device, dtype=torch.float32, periodic
     """``torch.hann_window`` that avoids the device-side default-dtype bug."""
     return torch.hann_window(window_length, periodic=periodic, dtype=dtype, device="cpu").to(device=device)
 
-#: Vendor FFT sizes that are trusted; everything else uses the exact DFT matmul.
-_TRUSTED_FFT_MIN = 1024
+#: Sizes allowed to use the vendor FFT, unless ``PYMSS_VENDOR_FFT_SIZES`` says
+#: otherwise.  Only the 2048-point transform the VR models use every chunk is
+#: proven both correct and fast; 4096 made scnet spend 600 s inside one call
+#: (the vendor plans/autotunes a transform the first time it sees a shape), and
+#: every smaller size has been caught returning silent zeros.
+_VENDOR_FFT_ALLOWED = frozenset({2048})
 
 _DFT_CACHE: dict[tuple[int, str, torch.dtype], tuple[torch.Tensor, torch.Tensor]] = {}
 
@@ -69,11 +74,12 @@ def _probe_vendor_fft(n: int, device) -> bool:
 def vendor_fft_trusted(n: int, device=None) -> bool:
     """Return ``True`` when the vendor FFT can be used for size ``n``.
 
-    BIREN's FFT is not reliable for every shape: size 1411 fails to build a plan
-    ("sufft build plan failed") and the 9-bin spectrum of a 16-point STFT comes
-    back as all zeros -- silently.  Large power-of-two sizes (2048 for the VR
-    models) are proven correct, so those keep the fast path and everything else
-    goes through an exact DFT matrix multiply.
+    BIREN's FFT is not reliable: size 1411 fails to build a plan ("sufft build
+    plan failed"), the 9-bin spectrum of a 16-point STFT and a 513-bin inverse of
+    a 1024-point STFT both come back as all zeros -- silently -- and size 4096
+    can spend ten minutes autotuning inside one call.  Only 2048 (the VR models'
+    transform) is proven both correct and fast; everything else uses an exact DFT
+    matrix multiply, which is deterministic and cheap at these sizes.
 
     Args:
         n: Transform length.
@@ -87,7 +93,9 @@ def vendor_fft_trusted(n: int, device=None) -> bool:
     Returns:
         ``True`` when the vendor kernel is trusted for this size.
     """
-    if n < _TRUSTED_FFT_MIN or (n & (n - 1)) != 0:
+    allowed = os.environ.get("PYMSS_VENDOR_FFT_SIZES", "")
+    sizes = {int(part) for part in allowed.split(",") if part.strip()} if allowed else _VENDOR_FFT_ALLOWED
+    if n not in sizes or (n & (n - 1)) != 0:
         return False
     if device is None:
         return True

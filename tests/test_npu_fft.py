@@ -166,12 +166,19 @@ class TestExactDftFallback:
         assert back.shape == x.shape
         assert torch.allclose(back, x, atol=2e-3)
 
-    def test_trusted_sizes_are_large_powers_of_two(self):
+    def test_only_the_proven_size_uses_the_vendor_kernel(self):
         assert vendor_fft_trusted(2048) is True
-        assert vendor_fft_trusted(4096) is True
+        # 4096 stalled scnet for 600 s inside one call; 1411 has no plan;
+        # 1024/16 answered silent zeros.
+        assert vendor_fft_trusted(4096) is False
         assert vendor_fft_trusted(1411) is False
-        assert vendor_fft_trusted(1023) is False
+        assert vendor_fft_trusted(1024) is False
         assert vendor_fft_trusted(16) is False
+
+    def test_env_override_can_widen_the_allowlist(self, monkeypatch):
+        monkeypatch.setenv("PYMSS_VENDOR_FFT_SIZES", "1024,2048")
+        assert vendor_fft_trusted(1024) is True
+        assert vendor_fft_trusted(4096) is False
 
     def test_stft_npu_is_exact_for_an_untrusted_size(self):
         x = torch.randn(1, 1, 64)
