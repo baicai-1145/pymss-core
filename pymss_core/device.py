@@ -393,6 +393,39 @@ def apply_vendor_env(device_or_vendor) -> dict[str, str]:
     return applied
 
 
+def set_current_vendor_device(device_type: str, index: int | None = None) -> int | None:
+    """Make ``index`` the current device for a vendor backend.
+
+    A device spec without an index (``torch.device("supa")``, which is what
+    pymss builds) resolves to the *current* device.  For PrivateUse1 backends
+    nothing sets it implicitly, so an op that needs it fails with a bare
+
+        ERROR (SUPA): ErrorCode: 101, invalid device
+
+    ``torch.cuda.set_device`` has the same role on NVIDIA.  The index defaults
+    to ``PYMSS_DEVICE_INDEX`` and then 0.
+
+    Args:
+        device_type: Device type string, e.g. ``"supa"``.
+        index: Device index to select.
+
+    Returns:
+        The index that was set, or ``None`` when the backend has no ``set_device``.
+    """
+    if device_type in ("cpu", "meta"):
+        return None  # torch.cpu.set_device exists but has nothing to select
+    module = getattr(torch, device_type, None)
+    setter = getattr(module, "set_device", None) if module is not None else None
+    if setter is None:
+        return None
+    chosen = index if index is not None else int(os.environ.get("PYMSS_DEVICE_INDEX", "0") or 0)
+    try:
+        setter(chosen)
+    except Exception:  # noqa: BLE001 - a vendor may reject the index; keep going
+        return None
+    return chosen
+
+
 def prepare_device_alias(alias: str) -> str:
     """Import the vendor extension for ``alias`` and return the device type.
 
@@ -419,6 +452,8 @@ def prepare_device_alias(alias: str) -> str:
     if device_type == "supa" and not hasattr(torch, "supa"):
         # Older BIRENSUPA releases expose SUPA devices as CUDA.
         device_type = "cuda"
+    # PrivateUse1 backends do not set a current device on their own.
+    set_current_vendor_device(device_type)
     return device_type
 
 
@@ -517,5 +552,6 @@ __all__ = (
     "requires_plugin",
     "rnn_fallback_required",
     "rnn_op_blocked",
+    "set_current_vendor_device",
     "vendor_env_defaults",
 )

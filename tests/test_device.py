@@ -23,6 +23,7 @@ from pymss_core.device import (
     autocast_dtype,
     clear_device_cache,
     rnn_op_blocked,
+    set_current_vendor_device,
     vendor_env_defaults,
     detect_vendor,
     fft_fallback_required,
@@ -251,3 +252,27 @@ def test_vendor_env_is_empty_for_other_vendors(monkeypatch):
     monkeypatch.delenv("PYMSS_VENDOR_ENV", raising=False)
     assert vendor_env_defaults("nvidia") == {}
     assert apply_vendor_env("cuda") == {}
+
+
+def test_current_vendor_device_is_set_for_privateuse1_backends(monkeypatch):
+    """A device spec without an index uses the *current* device, which nothing sets."""
+    monkeypatch.setenv("PYMSS_DEVICE_INDEX", "0")
+    monkeypatch.delenv("PYMSS_VENDOR_ENV", raising=False)
+    clear_device_cache()
+
+    class FakeVendor:
+        calls: list[int] = []
+
+        @classmethod
+        def set_device(cls, index):
+            cls.calls.append(index)
+
+    monkeypatch.setattr(torch, "fakevendor", FakeVendor, raising=False)
+    assert set_current_vendor_device("fakevendor") == 0
+    assert FakeVendor.calls == [0]
+    assert set_current_vendor_device("fakevendor", index=2) == 2
+    assert FakeVendor.calls == [0, 2]
+
+
+def test_current_vendor_device_is_optional():
+    assert set_current_vendor_device("cpu") is None
