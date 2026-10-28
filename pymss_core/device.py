@@ -118,6 +118,8 @@ class DeviceProfile:
     rnn: bool = True
     rnn_blocked: frozenset[str] = frozenset()
     dilated_conv: bool = True
+    complex_mul: bool = True
+    window_on_device: bool = True
     dilated_conv_allowed: frozenset[tuple[int, int]] = frozenset()
     amp: bool = True
     amp_dtype: torch.dtype = torch.float16
@@ -190,7 +192,8 @@ _PROFILES: dict[str, DeviceProfile] = {
     BIREN: DeviceProfile(
         BIREN, "supa", plugin="torch_br", complex_fft=False, rnn=False,
         amp=False, amp_dtype=torch.bfloat16, dilated_conv=False,
-        dilated_conv_allowed=frozenset({(1, 1), (2, 2)})
+        dilated_conv_allowed=frozenset({(1, 1), (2, 2)}),
+        complex_mul=False, window_on_device=False,
     ),
     MLU: DeviceProfile(MLU, "mlu", plugin="torch_mlu"),
     # Ascend's torch_npu builds ship npu_lstm/npu_gru without inference support
@@ -467,6 +470,15 @@ def prepare_device_alias(alias: str) -> str:
         device_type = "cuda"
     # PrivateUse1 backends do not set a current device on their own.
     set_current_vendor_device(device_type)
+    # Kernel gaps that every model would otherwise have to work around.
+    from pymss_core.vendor_shims import install_vendor_shims
+
+    profile_now = device_profile(device_type)
+    install_vendor_shims(
+        device_type,
+        complex_mul=profile_now.complex_mul,
+        window_on_device=profile_now.window_on_device,
+    )
     return device_type
 
 
