@@ -559,6 +559,20 @@ def std_equivalent(x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
     return torch.sqrt(var.clamp_min(0))
 
 
+def complex_to_host(tensor: torch.Tensor, copy) -> torch.Tensor:
+    """Copy a complex tensor with ``copy`` applied to its real/imaginary planes.
+
+    Args:
+        tensor: A complex tensor.
+        copy: Callable that moves a real tensor to the host (usually ``.cpu``).
+
+    Returns:
+        The complex tensor on the host.
+    """
+    planes = copy(torch.view_as_real(tensor).contiguous())
+    return torch.view_as_complex(planes)
+
+
 def install_cpu_shim() -> bool:
     """Copy non-contiguous device tensors to the host through a contiguous copy.
 
@@ -581,8 +595,7 @@ def install_cpu_shim() -> bool:
         if self.is_complex():
             # A complex host copy is also refused ("ErrorCode: 101, invalid
             # device"); the real/imaginary planes copy fine and rebuild here.
-            planes = original(self.view_as_real().contiguous(), *args, **kwargs)
-            return torch.view_as_complex(planes)
+            return complex_to_host(self, lambda plane: original(plane, *args, **kwargs))
         if not self.is_contiguous():
             return original(self.contiguous(), *args, **kwargs)
         return original(self, *args, **kwargs)

@@ -355,3 +355,23 @@ class TestCpuCopyComplex:
         install_cpu_shim()
         assert torch.equal(view.cpu(), view.clone())
         reset_shims()
+
+
+class TestComplexToHost:
+    """torch.Tensor has no .view_as_real method; the plane copy is a helper."""
+
+    def test_round_trip_keeps_values(self):
+        from pymss_core.vendor_shims import complex_to_host
+
+        x = torch.complex(torch.randn(2, 3), torch.randn(2, 3))
+        out = complex_to_host(x, lambda t: t)
+        assert out.dtype == torch.complex64
+        assert torch.equal(out, x)
+
+    def test_handles_strided_input(self):
+        from pymss_core.vendor_shims import complex_to_host
+
+        base = torch.complex(torch.randn(4, 6), torch.randn(4, 6))
+        view = base[:, ::2]
+        out = complex_to_host(view, lambda t: t)
+        assert torch.equal(out, view.clone())
