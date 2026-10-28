@@ -47,15 +47,17 @@ class TestShimInstallation:
         reset_shims()
         installed = install_vendor_shims(
             "supa", complex_mul=False, window_on_device=False, glu=True,
-            complex_reshape=False, group_norm=True,
+            complex_reshape=False, group_norm=True, interpolate=True,
         )
-        assert set(installed) == {"complex_mul", "window", "glu", "complex_reshape", "group_norm"}
+        assert set(installed) == {
+            "complex_mul", "window", "glu", "complex_reshape", "group_norm", "interpolate",
+        }
         assert install_vendor_shims("supa", complex_mul=False, window_on_device=False, glu=True) == []
         reset_shims()
 
     def test_window_shim_builds_on_host_for_device_targets(self):
         reset_shims()
-        install_vendor_shims("supa", complex_mul=False, window_on_device=False, glu=False, group_norm=False)
+        install_vendor_shims("supa", complex_mul=False, window_on_device=False, glu=False, group_norm=False, interpolate=False)
         # "meta" keeps this test device-independent while exercising the shim path.
         window = torch.hann_window(8, device="meta")
         assert window.device.type == "meta"
@@ -195,3 +197,30 @@ class TestGroupNormEquivalent:
 
         x = torch.randn(2, 6, 4, 4)
         assert torch.allclose(group_norm_equivalent(x, 3), F.group_norm(x, 3), atol=1e-5)
+
+
+class TestInterpolateShim:
+    def test_bf16_bilinear_keeps_its_dtype_and_shape(self):
+        import torch.nn.functional as F
+
+        from pymss_core.vendor_shims import install_interpolate_shim, reset_shims
+
+        reset_shims()
+        install_interpolate_shim()
+        x = torch.randn(2, 4, 8, 8).bfloat16()
+        got = F.interpolate(x, scale_factor=2, mode="bilinear")
+        assert got.dtype == torch.bfloat16
+        assert got.shape == (2, 4, 16, 16)
+        assert torch.allclose(got.float(), F.interpolate(x.float(), scale_factor=2, mode="bilinear"), atol=1e-2)
+        reset_shims()
+
+    def test_nearest_is_left_alone(self):
+        import torch.nn.functional as F
+
+        from pymss_core.vendor_shims import install_interpolate_shim, reset_shims
+
+        reset_shims()
+        install_interpolate_shim()
+        x = torch.randn(1, 2, 4, 4).bfloat16()
+        assert F.interpolate(x, scale_factor=2, mode="nearest").dtype == torch.bfloat16
+        reset_shims()

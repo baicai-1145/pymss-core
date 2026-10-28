@@ -328,6 +328,52 @@ def install_group_norm_shim() -> bool:
     return True
 
 
+#: Interpolation modes with no bfloat16 kernel on BIREN.
+_BF16_LESS_UPSAMPLE_MODES = frozenset({"bilinear", "bicubic", "linear", "trilinear"})
+
+
+def install_interpolate_shim() -> bool:
+    """Run bf16 interpolation in fp32 on the device.
+
+    ``F.interpolate(..., mode="bilinear")`` on bfloat16 fails with
+
+        ERROR (BR TORCH INTERNAL) ... no valid backend was found for op:
+        UpsampleBilinear, ErrorCode: 2
+
+    which used to make us disable autocast for the whole separator model.  The
+    operator is linear, so computing it in fp32 and casting back is exact to
+    within bf16 rounding, and it keeps everything on the device -- the only cost
+    is one cast pair on a memory-bound op at the end of the network.
+
+    Returns:
+        ``True`` when the shim was installed, ``False`` when it already was.
+    """
+    if "interpolate" in _installed:
+        return False
+    import torch.nn.functional as F
+
+    original = F.interpolate
+
+    def interpolate(input, *args, **kwargs):
+        mode = kwargs.get("mode", "nearest")
+        device = getattr(input, "device", None)
+        needs_fp32 = (
+            isinstance(mode, str)
+            and mode in _BF16_LESS_UPSAMPLE_MODES
+            and input.dtype == torch.bfloat16
+            and device is not None
+            and device.type not in ("cpu", "meta")
+        )
+        if not needs_fp32:
+            return original(input, *args, **kwargs)
+        return original(input.float(), *args, **kwargs).to(torch.bfloat16)
+
+    interpolate._vendor_shim = True
+    F.interpolate = interpolate
+    _installed.add("interpolate")
+    return True
+
+
 #: Shim name -> installer.
 SHIMS = {
     "complex_mul": install_complex_mul_shim,
@@ -335,6 +381,7 @@ SHIMS = {
     "window": install_window_shim,
     "glu": install_glu_shim,
     "group_norm": install_group_norm_shim,
+    "interpolate": install_interpolate_shim,
 }
 
 
@@ -346,6 +393,7 @@ def install_vendor_shims(
     glu: bool = True,
     complex_reshape: bool = True,
     group_norm: bool = True,
+    interpolate: bool = True,
 ) -> list[str]:
     """Install the shims a device profile asks for.
 
@@ -356,6 +404,7 @@ def install_vendor_shims(
         glu: ``True`` when ``F.glu`` should be replaced by its elementwise form.
         complex_reshape: ``False`` when complex tensors cannot be reshaped.
         group_norm: ``True`` when ``F.group_norm`` should be replaced.
+        interpolate: ``True`` when bf16 interpolation must run in fp32.
 
     Returns:
         The shim names that were installed by this call.
@@ -373,6 +422,8 @@ def install_vendor_shims(
         wanted.append("glu")
     if group_norm:
         wanted.append("group_norm")
+    if interpolate:
+        wanted.append("interpolate")
     installed = []
     for name in wanted:
         if SHIMS[name]():

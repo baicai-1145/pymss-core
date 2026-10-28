@@ -123,6 +123,7 @@ class DeviceProfile:
     window_on_device: bool = True
     glu_shim: bool = False
     group_norm_shim: bool = False
+    interpolate_shim: bool = False
     scatter_add: bool = True
     dilated_conv_allowed: frozenset[tuple[int, int]] = frozenset()
     amp: bool = True
@@ -180,12 +181,11 @@ _PROFILES: dict[str, DeviceProfile] = {
     # * float16 is unusable: br10x matmul takes bf16/fp32/s8/u8 only and
     #   ``torch.autocast("supa", dtype=torch.float16)`` raises "Current SUPA
     #   Device does not support float16. Please switch dtype to bfloat16."
-    # * bfloat16 autocast is unusable for the separator models: they end with a
-    #   bilinear upsample and the vendor has no bf16 kernel for it
-    #       ERROR (BR TORCH INTERNAL) ... no valid backend was found for op:
-    #       UpsampleBilinear, ErrorCode: 2
-    #   so ``amp`` is off here.  ``amp_dtype`` documents what to use if a model
-    #   is ever opted in.
+    # * bfloat16 is the working reduced precision (the vendor documents bf16 and
+    #   fp32 for SDPA, and br10x matmul takes bf16/fp32/s8/u8).  One operator has
+    #   no bf16 kernel -- bilinear upsample, which every separator model ends
+    #   with -- so the interpolate shim runs that one op in fp32 on the device
+    #   instead of disabling autocast for the whole model.
     # Dilations: only the SUDNN plan path aborts.  With the eager conv kernels
     # that pymss selects for BIREN (BRTB_ENABLE_FORCE_EAGER_CONV2D, see
     # _VENDOR_ENV_DEFAULTS) every asymmetric combination measured passes:
@@ -195,10 +195,10 @@ _PROFILES: dict[str, DeviceProfile] = {
     # the eager path off, and dilated_conv_blocked() short-circuits when it is on.
     BIREN: DeviceProfile(
         BIREN, "supa", plugin="torch_br", complex_fft=False, rnn=False,
-        amp=False, amp_dtype=torch.bfloat16, dilated_conv=False,
+        amp=True, amp_dtype=torch.bfloat16, dilated_conv=False,
         dilated_conv_allowed=frozenset({(1, 1), (2, 2)}),
         complex_mul=False, complex_reshape=False, window_on_device=False, glu_shim=True,
-        group_norm_shim=True,
+        group_norm_shim=True, interpolate_shim=True,
         scatter_add=False,
     ),
     MLU: DeviceProfile(MLU, "mlu", plugin="torch_mlu"),
@@ -487,6 +487,7 @@ def prepare_device_alias(alias: str) -> str:
         window_on_device=profile_now.window_on_device,
         glu=profile_now.glu_shim,
         group_norm=profile_now.group_norm_shim,
+        interpolate=profile_now.interpolate_shim,
     )
     return device_type
 

@@ -205,10 +205,8 @@ def test_rnn_blocked_selects_single_cells(monkeypatch):
 def test_autocast_dtype_follows_the_profile():
     """BIREN br10x has no float16 matmul, so autocast must ask for bfloat16."""
     assert autocast_dtype("cuda") is torch.float16
-    # amp is off for BIREN (no bf16 kernel for UpsampleBilinear), so the dtype
-    # resolves to float32; the profile still records what to use if enabled.
-    assert autocast_dtype("supa") is torch.float32
-    assert device_profile("supa").amp_dtype is torch.bfloat16
+    # bf16 is the reduced precision BIREN actually supports (no fp16 matmul).
+    assert autocast_dtype("supa") is torch.bfloat16
     # amp=False devices fall back to plain float32.
     assert autocast_dtype("cpu") is torch.float32
 
@@ -305,10 +303,14 @@ def test_eager_conv_enabled_parses_falsey_values(monkeypatch):
     assert eager_conv_enabled() is True
 
 
-def test_biren_amp_is_off_because_upsample_has_no_bf16_kernel(monkeypatch):
-    """UpsampleBilinear has no bf16 backend on SUPA, so autocast must not run."""
+
+
+
+def test_biren_uses_bfloat16_autocast(monkeypatch):
+    """bf16 is the working reduced precision; only one op needs a shim."""
     monkeypatch.delenv("PYMSS_AMP", raising=False)
     clear_device_cache()
-    assert amp_supported("supa") is False
-    assert autocast_dtype("supa") == torch.float32
-    assert device_profile("supa").amp_dtype == torch.bfloat16
+    profile = device_profile("supa")
+    assert profile.amp is True
+    assert profile.amp_dtype is torch.bfloat16
+    assert profile.interpolate_shim is True
