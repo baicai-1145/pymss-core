@@ -325,12 +325,13 @@ def test_prepare_device_installs_the_rnn_fallback(monkeypatch):
         dev.BIREN, "cpu", plugin=None, complex_fft=False, rnn=False, amp=True,
         amp_dtype=torch.bfloat16, channels_last=False, multi_device=False,
     )
+    calls = []
     monkeypatch.setattr(dev, "profile_for_alias", lambda alias: fake)
     monkeypatch.setattr(dev, "set_current_vendor_device", lambda device_type: None)
     monkeypatch.setattr(dev, "device_profile", lambda device=None: fake)
-    rnn._installed = False
-    try:
-        dev.prepare_device_alias("biren")
-        assert rnn._installed is True
-    finally:
-        rnn._installed = False
+    # Spy instead of installing: patching nn.LSTM globally would leak into other tests.
+    monkeypatch.setattr(rnn, "install_rnn_cpu_fallback", lambda: calls.append("rnn"))
+
+    dev.prepare_device_alias("biren")
+
+    assert calls == ["rnn"]
