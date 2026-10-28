@@ -36,7 +36,7 @@ class NormMLP(BaseNormMLP):
         return mb.permute(0, 2, 3, 1)
     def forward(self, qb):
         from torch.utils.checkpoint import checkpoint_sequential
-        if hasattr(self, "combined"): mb = checkpoint_sequential(self.combined, 2, qb, use_reentrant=False) if self.use_checkpoint else self.combined(qb)
+        if hasattr(self, "combined"): mb = checkpoint_sequential(self.combined, 2, qb, use_reentrant=False) if (self.use_checkpoint and self.training) else self.combined(qb)
         else: mb = self.output(self.hidden(self.norm(qb)))
         return self.reshape_output(mb)
 class MultAddNormMLP(NormMLP):
@@ -99,7 +99,12 @@ class OverlappingMaskEstimationModule(MaskEstimationModuleBase):
                 total = None
                 break
             if fstart or fend < self.n_freq:
-                mask = F.pad(mask, (0, 0, fstart, self.n_freq - fend))
+                # F.pad maps to a padding kernel BIREN rejects ('Unsupported BR type
+                # for ScalarType: 0'); cat of zeros is the same and always works.
+                b_, c_, _, t_ = mask.shape
+                left = mask.new_zeros(b_, c_, fstart, t_)
+                right = mask.new_zeros(b_, c_, self.n_freq - fend, t_)
+                mask = torch.cat((left, mask, right), dim=2)
             total = mask if total is None else total + mask
         if total is not None:
             masks = total
