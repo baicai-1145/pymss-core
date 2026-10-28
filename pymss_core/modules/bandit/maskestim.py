@@ -105,7 +105,18 @@ class OverlappingMaskEstimationModule(MaskEstimationModuleBase):
                     f" in_channels={self.in_channels} n_freq={self.n_freq}",
                     flush=True,
                 )
-            if self.use_freq_weights: mask = mask * self.get_buffer(f'freq_weights/{im}')[:, None]
+            if self.use_freq_weights:
+                fw = self.get_buffer(f'freq_weights/{im}')
+                if os.environ.get("PYMSS_DEBUG_MASKS"):
+                    print(
+                        f"      freq_weights[{im}]={tuple(fw.shape)} {fw.dtype} {fw.device}"
+                        f" mask_before={tuple(mask.shape)} {mask.dtype} {mask.device}",
+                        flush=True,
+                    )
+                # BIREN mis-broadcasts operands of different rank (a (1,1,w,t) mask
+                # times a (w,1) weight came back as (w,1,w,t)), so the weight is
+                # shaped to the mask explicitly and cast to its real dtype.
+                mask = mask * fw.to(device=mask.device, dtype=mask.real.dtype).reshape(1, 1, -1, 1)
             if mask.shape[2] != fend - fstart or fend > self.n_freq:
                 total = None
                 break

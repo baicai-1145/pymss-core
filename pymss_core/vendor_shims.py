@@ -483,6 +483,48 @@ def install_complex_cat_shim() -> bool:
     return True
 
 
+def install_fft_shim() -> bool:
+    """Route ``torch.fft.rfft``/``irfft`` through the exact DFT implementation.
+
+    The vendor documents ``torch.fft.*`` as unsupported, and the parts that do run
+    are not dependable: some shapes answer zeros without raising, 4096-point
+    transforms spend minutes in the planner, and a 4-D ``rfft`` from scnet fails
+    outright with "Failed to find supa function".  The models call
+    ``torch.fft.rfft`` with a ``dim`` and a ``norm``, so the shim reproduces those
+    two arguments exactly on top of the matrix implementation.
+
+    Returns:
+        ``True`` when the shim was installed, ``False`` when it already was.
+    """
+    if "fft" in _installed:
+        return False
+    from pymss_core.npu_fft import irfft_exact, rfft_exact
+
+    original_rfft = torch.fft.rfft
+    original_irfft = torch.fft.irfft
+
+    def _vendor(tensor) -> bool:
+        device = getattr(tensor, "device", None)
+        return device is not None and device.type not in ("cpu", "meta")
+
+    def rfft(input, n=None, dim=-1, norm=None, *, out=None):
+        if not _vendor(input) or input.is_complex():
+            return original_rfft(input, n, dim, norm, out=out) if out is not None else original_rfft(input, n, dim, norm)
+        return rfft_exact(input, n, dim, norm)
+
+    def irfft(input, n=None, dim=-1, norm=None, *, out=None):
+        if not _vendor(input) or not input.is_complex():
+            return original_irfft(input, n, dim, norm, out=out) if out is not None else original_irfft(input, n, dim, norm)
+        return irfft_exact(input, n, dim, norm)
+
+    rfft._vendor_shim = True
+    irfft._vendor_shim = True
+    torch.fft.rfft = rfft
+    torch.fft.irfft = irfft
+    _installed.add("fft")
+    return True
+
+
 #: Shim name -> installer.
 SHIMS = {
     "complex_mul": install_complex_mul_shim,
@@ -493,6 +535,7 @@ SHIMS = {
     "interpolate": install_interpolate_shim,
     "conv1d": install_conv1d_shim,
     "complex_cat": install_complex_cat_shim,
+    "fft": install_fft_shim,
 }
 
 
@@ -507,6 +550,7 @@ def install_vendor_shims(
     interpolate: bool = True,
     conv1d: bool = False,
     complex_cat: bool = False,
+    fft: bool = False,
 ) -> list[str]:
     """Install the shims a device profile asks for.
 
@@ -520,6 +564,7 @@ def install_vendor_shims(
         interpolate: ``True`` when bf16 interpolation must run in fp32.
         conv1d: ``False`` when grouped conv1d must be split per group.
         complex_cat: ``True`` when complex ``torch.cat`` must go via the planes.
+        fft: ``True`` when ``torch.fft.rfft``/``irfft`` must be replaced.
 
     Returns:
         The shim names that were installed by this call.
@@ -543,6 +588,8 @@ def install_vendor_shims(
         wanted.append("conv1d")
     if complex_cat:
         wanted.append("complex_cat")
+    if fft:
+        wanted.append("fft")
     installed = []
     for name in wanted:
         if SHIMS[name]():

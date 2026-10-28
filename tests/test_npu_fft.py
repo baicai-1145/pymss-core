@@ -9,7 +9,9 @@ from pymss_core.npu_fft import (
     hann_window_npu,
     istft_npu,
     masked_spectrum,
+    irfft_exact,
     numpy_complex_to_device,
+    rfft_exact,
     stft_npu,
     vendor_fft_trusted,
 )
@@ -204,3 +206,32 @@ class TestDegenerateVendorResult:
         from pymss_core.npu_fft import _degenerate
 
         assert _degenerate(torch.ones(2, 3), torch.ones(2, 3)) is False
+
+
+class TestExactFftAnyDim:
+    """Models call torch.fft.rfft with a dim and a norm; both must be honoured."""
+
+    @pytest.mark.parametrize(
+        ("dim", "n", "norm"),
+        [(3, None, "ortho"), (-1, 64, "backward"), (2, 32, None), (1, 16, "forward")],
+    )
+    def test_rfft_matches_torch(self, dim, n, norm):
+        x = torch.randn(2, 5, 7, 9)
+        assert torch.allclose(rfft_exact(x, n=n, dim=dim, norm=norm), torch.fft.rfft(x, n=n, dim=dim, norm=norm), atol=1e-4)
+
+    @pytest.mark.parametrize(
+        ("dim", "n", "norm"),
+        [(3, None, "ortho"), (-1, 64, "backward"), (2, 32, "forward")],
+    )
+    def test_irfft_matches_torch(self, dim, n, norm):
+        x = torch.randn(2, 5, 7, 9)
+        spec = torch.fft.rfft(x, n=n, dim=dim, norm=norm)
+        assert torch.allclose(irfft_exact(spec, n=n, dim=dim, norm=norm), torch.fft.irfft(spec, n=n, dim=dim, norm=norm), atol=1e-4)
+
+    def test_fft_shim_is_idempotent(self):
+        from pymss_core.vendor_shims import install_fft_shim, reset_shims
+
+        reset_shims()
+        assert install_fft_shim() is True
+        assert install_fft_shim() is False
+        reset_shims()

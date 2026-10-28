@@ -126,6 +126,7 @@ class DeviceProfile:
     interpolate_shim: bool = False
     grouped_conv1d: bool = False
     complex_cat: bool = False
+    fft_shim: bool = False
     scatter_add: bool = True
     dilated_conv_allowed: frozenset[tuple[int, int]] = frozenset()
     amp: bool = True
@@ -200,7 +201,7 @@ _PROFILES: dict[str, DeviceProfile] = {
         amp=True, amp_dtype=torch.bfloat16, dilated_conv=False,
         dilated_conv_allowed=frozenset({(1, 1), (2, 2)}),
         complex_mul=False, complex_reshape=False, window_on_device=False, glu_shim=True,
-        group_norm_shim=True, interpolate_shim=True, grouped_conv1d=True, complex_cat=True,
+        group_norm_shim=True, interpolate_shim=True, grouped_conv1d=True, complex_cat=True, fft_shim=True,
         scatter_add=False,
     ),
     MLU: DeviceProfile(MLU, "mlu", plugin="torch_mlu"),
@@ -492,6 +493,7 @@ def prepare_device_alias(alias: str) -> str:
         interpolate=profile_now.interpolate_shim,
         conv1d=profile_now.grouped_conv1d,
         complex_cat=profile_now.complex_cat,
+        fft=profile_now.fft_shim,
     )
     # Recurrent cells: the fused _VF.lstm is both wrong and catastrophically slow
     # on BIREN (605 s for one (18, 57, 128) call), and the profile already says

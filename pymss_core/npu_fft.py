@@ -177,6 +177,43 @@ def _irfft_matmul(spec: torch.Tensor, n: int) -> torch.Tensor:
     return out.reshape(*lead, n)
 
 
+def _pad_to_length(x: torch.Tensor, n: int, dim: int) -> torch.Tensor:
+    """Pad or truncate ``x`` to ``n`` samples along ``dim`` (torch.fft semantics)."""
+    size = x.shape[dim]
+    if size == n:
+        return x
+    if size > n:
+        return x.narrow(dim, 0, n)
+    shape = list(x.shape)
+    shape[dim] = n - size
+    pad = torch.zeros(shape, dtype=x.dtype, device=x.device)
+    return torch.cat((x, pad), dim=dim)
+
+
+def rfft_exact(x: torch.Tensor, n: int | None = None, dim: int = -1, norm: str | None = None) -> torch.Tensor:
+    """``torch.fft.rfft`` by DFT matrix multiply, for any dim and norm."""
+    n = x.shape[dim] if n is None else n
+    moved = _pad_to_length(x, n, dim).movedim(dim, -1)
+    spectrum = _rfft_matmul(moved, n)
+    if norm == "ortho":
+        spectrum = spectrum / math.sqrt(n)
+    elif norm == "forward":
+        spectrum = spectrum / n
+    return spectrum.movedim(-1, dim)
+
+
+def irfft_exact(spec: torch.Tensor, n: int | None = None, dim: int = -1, norm: str | None = None) -> torch.Tensor:
+    """``torch.fft.irfft`` by DFT matrix multiply, for any dim and norm."""
+    n = 2 * (spec.shape[dim] - 1) if n is None else n
+    moved = spec.movedim(dim, -1)
+    wave = _irfft_matmul(moved, n)
+    if norm == "ortho":
+        wave = wave * math.sqrt(n)
+    elif norm == "forward":
+        wave = wave * n
+    return wave.movedim(-1, dim)
+
+
 def _fit_window(window: torch.Tensor, n_fft: int, win_length: int, device, dtype) -> torch.Tensor:
     window = window.to(device=device, dtype=dtype)
     if win_length != n_fft:
@@ -412,4 +449,12 @@ def torch_stft_blocked(device) -> bool:
     return fft_fallback_required(device)
 
 
-__all__ = ["hann_window_npu", "istft_npu", "stft_npu", "torch_stft_blocked", "vendor_fft_trusted"]
+__all__ = [
+    "hann_window_npu",
+    "irfft_exact",
+    "istft_npu",
+    "rfft_exact",
+    "stft_npu",
+    "torch_stft_blocked",
+    "vendor_fft_trusted",
+]
