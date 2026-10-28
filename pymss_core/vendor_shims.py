@@ -63,21 +63,21 @@ def complex_planes_product(a, b) -> torch.Tensor:
 
 
 def _needs_plane_product(a, b) -> bool:
+    """Return ``True`` when ``a * b`` needs the real-plane kernel."""
     if _is_number(a) and _is_number(b):
         return False
-    tensor = b if _is_number(b) else a
-    if not isinstance(tensor, torch.Tensor) or not tensor.is_complex():
+    if _is_number(a):
+        # (scalar, tensor) -- normalise to (tensor, scalar)
+        a, b = b, a
+    if not isinstance(a, torch.Tensor) or not a.is_complex() or a.dtype != torch.complex64:
         return False
-    if tensor.dtype != torch.complex64:
-        return False
-    other = a if _is_number(b) else b
-    if _is_number(other):
+    if _is_number(b):
         return True
-    if not isinstance(other, torch.Tensor):
+    if not isinstance(b, torch.Tensor):
         return False
-    if other.is_complex():
-        return other.dtype == torch.complex64
-    return torch.is_floating_point(other)
+    if b.is_complex():
+        return b.dtype == torch.complex64
+    return torch.is_floating_point(b)
 
 
 def install_complex_mul_shim() -> bool:
@@ -92,18 +92,22 @@ def install_complex_mul_shim() -> bool:
     original_rmul = torch.Tensor.__rmul__
     torch_mul = torch.mul
 
+    def _on_device(operand) -> bool:
+        device = getattr(operand, "device", None)
+        return device is not None and device.type not in ("cpu", "meta")
+
     def mul(self, other):
-        if _needs_plane_product(self, other):
+        if _on_device(self) and _needs_plane_product(self, other):
             return complex_planes_product(self, other)
         return original_mul(self, other)
 
     def rmul(self, other):
-        if _needs_plane_product(other, self):
+        if _on_device(self) and _needs_plane_product(other, self):
             return complex_planes_product(other, self)
         return original_rmul(self, other)
 
     def mul_fn(a, b, *args, **kwargs):
-        if not args and not kwargs and _needs_plane_product(a, b):
+        if not args and not kwargs and (_on_device(a) or _on_device(b)) and _needs_plane_product(a, b):
             return complex_planes_product(a, b)
         return torch_mul(a, b, *args, **kwargs)
 

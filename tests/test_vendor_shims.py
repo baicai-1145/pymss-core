@@ -123,3 +123,26 @@ class TestScatterAddEquivalent:
         want = torch.zeros(4, 7)
         want.scatter_add_(1, index[None, :].expand(4, 6), src)
         assert torch.allclose(scatter_add_equivalent(src, index, 1, 7), want, atol=1e-6)
+
+
+class TestPlaneProductPredicate:
+    def test_scalar_on_either_side_requests_the_plane_kernel(self):
+        from pymss_core.vendor_shims import _needs_plane_product
+
+        spec = torch.randn(2, 18, 2049, dtype=torch.complex64)
+        assert _needs_plane_product(spec, 0.015625) is True
+        assert _needs_plane_product(0.015625, spec) is True
+        assert _needs_plane_product(spec, 1 - 2j) is True
+
+    def test_real_operands_stay_native(self):
+        from pymss_core.vendor_shims import _needs_plane_product
+
+        assert _needs_plane_product(torch.randn(2, 3), 0.5) is False
+        assert _needs_plane_product(torch.randn(2, 3), torch.randn(2, 3)) is False
+
+    def test_scalar_normalisation_does_not_lose_the_tensor(self):
+        from pymss_core.vendor_shims import complex_planes_product
+
+        spec = torch.randn(2, 18, 2049, dtype=torch.complex64)
+        scale = (1.0 / 4096) ** 0.5
+        assert torch.allclose(complex_planes_product(0.015625, spec), spec * scale, atol=1e-6)
