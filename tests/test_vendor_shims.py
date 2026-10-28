@@ -306,3 +306,29 @@ class TestStdEquivalent:
         want = x.std(dim=dim, keepdim=keepdim, unbiased=unbiased)
         got = std_equivalent(x, dim=dim, keepdim=keepdim, unbiased=unbiased)
         assert torch.allclose(got, want, atol=1e-6)
+
+
+class TestCpuCopy:
+    """A non-contiguous device tensor cannot be copied to the host directly."""
+
+    def test_contiguous_copy_matches(self):
+        from pymss_core.vendor_shims import install_cpu_shim, reset_shims
+
+        reset_shims()
+        base = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
+        view = base[:, :, ::2]
+        assert not view.is_contiguous()
+        want = view.clone()
+        install_cpu_shim()
+        got = view.cpu()
+        assert torch.equal(got, want)
+        reset_shims()
+
+    def test_contiguous_tensor_is_untouched(self):
+        from pymss_core.vendor_shims import install_cpu_shim, reset_shims
+
+        reset_shims()
+        x = torch.randn(3, 4)
+        install_cpu_shim()
+        assert torch.equal(x.cpu(), x.clone())
+        reset_shims()

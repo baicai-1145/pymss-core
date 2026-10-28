@@ -559,6 +559,33 @@ def std_equivalent(x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
     return torch.sqrt(var.clamp_min(0))
 
 
+def install_cpu_shim() -> bool:
+    """Copy non-contiguous device tensors to the host through a contiguous copy.
+
+    ``.cpu()`` on a non-contiguous device tensor fails with
+    ``ErrorCode: 11, Sudnn Error`` -- scnet returns a ``(1, 1, 2, 16384)`` view with
+    stride ``(34816, 34816, 17408, 1)`` and its very first host copy raised it,
+    while ``contiguous().cpu()``, ``reshape(-1).cpu()`` and ``clone().cpu()`` all
+    work.  Users copy audio back to the host, so this has to be transparent.
+
+    Returns:
+        ``True`` when the shim was installed, ``False`` when it already was.
+    """
+    if "cpu" in _installed:
+        return False
+    original = torch.Tensor.cpu
+
+    def cpu(self, *args, **kwargs):
+        if self.device.type in ("cpu", "meta") or self.is_contiguous():
+            return original(self, *args, **kwargs)
+        return original(self.contiguous(), *args, **kwargs)
+
+    cpu._vendor_shim = True
+    torch.Tensor.cpu = cpu
+    _installed.add("cpu")
+    return True
+
+
 def install_std_shim() -> bool:
     """Replace ``Tensor.std`` on vendor devices.
 
@@ -592,6 +619,7 @@ SHIMS = {
     "complex_cat": install_complex_cat_shim,
     "fft": install_fft_shim,
     "std": install_std_shim,
+    "cpu": install_cpu_shim,
 }
 
 
@@ -608,6 +636,7 @@ def install_vendor_shims(
     complex_cat: bool = False,
     fft: bool = False,
     std: bool = False,
+    cpu: bool = False,
 ) -> list[str]:
     """Install the shims a device profile asks for.
 
@@ -623,6 +652,7 @@ def install_vendor_shims(
         complex_cat: ``True`` when complex ``torch.cat`` must go via the planes.
         fft: ``True`` when ``torch.fft.rfft``/``irfft`` must be replaced.
         std: ``True`` when ``Tensor.std`` must be rebuilt from ``var``.
+        cpu: ``True`` when a non-contiguous host copy must go via ``contiguous``.
 
     Returns:
         The shim names that were installed by this call.
@@ -650,6 +680,8 @@ def install_vendor_shims(
         wanted.append("fft")
     if std:
         wanted.append("std")
+    if cpu:
+        wanted.append("cpu")
     installed = []
     for name in wanted:
         if SHIMS[name]():
