@@ -146,3 +146,26 @@ class TestPlaneProductPredicate:
         spec = torch.randn(2, 18, 2049, dtype=torch.complex64)
         scale = (1.0 / 4096) ** 0.5
         assert torch.allclose(complex_planes_product(0.015625, spec), spec * scale, atol=1e-6)
+
+
+class TestComplexReshape:
+    def test_matches_native_reshape(self):
+        from pymss_core.vendor_shims import complex_reshape
+
+        spec = torch.view_as_complex(torch.randn(2, 6, 5, 2))
+        assert torch.equal(complex_reshape(spec, 2, 30), spec.reshape(2, 30))
+        assert torch.equal(complex_reshape(spec, -1, 5), spec.reshape(-1, 5))
+
+    def test_flatten_is_exact(self):
+        from pymss_core.vendor_shims import complex_reshape
+
+        spec = torch.view_as_complex(torch.randn(12, 2))
+        assert torch.equal(complex_reshape(spec, 12), spec.reshape(12))
+
+    def test_installation_is_idempotent(self):
+        from pymss_core.vendor_shims import install_complex_reshape_shim, reset_shims
+
+        reset_shims()
+        assert install_complex_reshape_shim() is True
+        assert install_complex_reshape_shim() is False
+        reset_shims()

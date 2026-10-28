@@ -119,6 +119,7 @@ class DeviceProfile:
     rnn_blocked: frozenset[str] = frozenset()
     dilated_conv: bool = True
     complex_mul: bool = True
+    complex_reshape: bool = True
     window_on_device: bool = True
     glu_shim: bool = False
     scatter_add: bool = True
@@ -195,7 +196,7 @@ _PROFILES: dict[str, DeviceProfile] = {
         BIREN, "supa", plugin="torch_br", complex_fft=False, rnn=False,
         amp=False, amp_dtype=torch.bfloat16, dilated_conv=False,
         dilated_conv_allowed=frozenset({(1, 1), (2, 2)}),
-        complex_mul=False, window_on_device=False, glu_shim=True,
+        complex_mul=False, complex_reshape=False, window_on_device=False, glu_shim=True,
         scatter_add=False,
     ),
     MLU: DeviceProfile(MLU, "mlu", plugin="torch_mlu"),
@@ -480,6 +481,7 @@ def prepare_device_alias(alias: str) -> str:
     install_vendor_shims(
         device_type,
         complex_mul=profile_now.complex_mul,
+        complex_reshape=profile_now.complex_reshape,
         window_on_device=profile_now.window_on_device,
         glu=profile_now.glu_shim,
     )

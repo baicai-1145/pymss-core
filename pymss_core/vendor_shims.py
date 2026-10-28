@@ -223,9 +223,62 @@ def scatter_add_equivalent(src: torch.Tensor, index: torch.Tensor, dim: int, siz
     return out.movedim(-2, dim)
 
 
+def complex_reshape(x: torch.Tensor, *shape) -> torch.Tensor:
+    """Reshape a complex tensor through its real planes.
+
+    BIREN fails on ``complex.reshape`` when the reshape needs a copy:
+
+        [SUDNN] Failed to calculate matrix size, since date type 13 is not supported
+        SUPASysCtl.cpp:161 dev -1 is not a device
+
+    (dtype 13 is complex64, and the failure also resets the current device).  The
+    real planes reshape with the plain kernel and the complex view is rebuilt.
+
+    Args:
+        x: Complex tensor.
+        *shape: Target shape, without the trailing plane dimension.
+
+    Returns:
+        The reshaped complex tensor.
+    """
+    planes = torch.view_as_real(x)
+    return torch.view_as_complex(planes.reshape(*shape, 2).contiguous())
+
+
+def install_complex_reshape_shim() -> bool:
+    """Route ``Tensor.reshape``/``Tensor.view`` for complex operands via the planes.
+
+    Returns:
+        ``True`` when the shim was installed, ``False`` when it already was.
+    """
+    if "complex_reshape" in _installed:
+        return False
+    original_reshape = torch.Tensor.reshape
+    original_view = torch.Tensor.view
+
+    def _on_device(tensor) -> bool:
+        return tensor.device.type not in ("cpu", "meta")
+
+    def reshape(self, *shape):
+        if self.is_complex() and self.dtype == torch.complex64 and _on_device(self):
+            return complex_reshape(self, *shape)
+        return original_reshape(self, *shape)
+
+    def view(self, *shape):
+        if self.is_complex() and self.dtype == torch.complex64 and _on_device(self):
+            return complex_reshape(self, *shape)
+        return original_view(self, *shape)
+
+    torch.Tensor.reshape = reshape
+    torch.Tensor.view = view
+    _installed.add("complex_reshape")
+    return True
+
+
 #: Shim name -> installer.
 SHIMS = {
     "complex_mul": install_complex_mul_shim,
+    "complex_reshape": install_complex_reshape_shim,
     "window": install_window_shim,
     "glu": install_glu_shim,
 }
@@ -237,6 +290,7 @@ def install_vendor_shims(
     complex_mul: bool = True,
     window_on_device: bool = True,
     glu: bool = True,
+    complex_reshape: bool = True,
 ) -> list[str]:
     """Install the shims a device profile asks for.
 
@@ -245,6 +299,7 @@ def install_vendor_shims(
         complex_mul: ``False`` when the backend has no ``complex * real`` kernel.
         window_on_device: ``False`` when windows cannot be built on the device.
         glu: ``True`` when ``F.glu`` should be replaced by its elementwise form.
+        complex_reshape: ``False`` when complex tensors cannot be reshaped.
 
     Returns:
         The shim names that were installed by this call.
@@ -254,6 +309,8 @@ def install_vendor_shims(
     wanted = []
     if not complex_mul:
         wanted.append("complex_mul")
+    if not complex_reshape:
+        wanted.append("complex_reshape")
     if not window_on_device:
         wanted.append("window")
     if glu:
