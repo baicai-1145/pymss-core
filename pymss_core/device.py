@@ -149,11 +149,19 @@ _PROFILES: dict[str, DeviceProfile] = {
     ILUVATAR: DeviceProfile(ILUVATAR, "cuda"),
     METAX: DeviceProfile(METAX, "cuda"),
     ENFLAME: DeviceProfile(ENFLAME, "gcu", plugin="torch_gcu"),
-    # Measured on BIREN106M + torch 2.7.0+cpu / torch-br 1.7.0.20700 (SUPA 1.9.0):
-    # ``stft(return_complex=True)`` raises "does not support return_complex=True
-    # now", while the rfft-based composition matches torch to 9.5e-07; GRU hits
-    # an unimplemented ``aten::_thnn_fused_gru_cell`` although LSTM is native.
-    BIREN: DeviceProfile(BIREN, "supa", plugin="torch_br", complex_fft=False, rnn_blocked=frozenset({"gru"})),
+    # Measured on BIREN106M + torch 2.7.0+cpu / torch-br 1.7.0.20700 (SUPA 1.9.0),
+    # 31.75 GiB, device type ``supa``:
+    # * ``stft(return_complex=True)`` raises "does not support return_complex=True
+    #   now"; the rfft-based composition matches torch to 2.3e-05 (spec) / 9.5e-07
+    #   (waveform), so ``complex_fft=False``.
+    # * ``hann_window(..., device="supa")`` dies with a SUPA kernel launch error;
+    #   windows must be built on CPU, which ``hann_window_npu`` already does.
+    # * The fused ``_VF.lstm`` is silently WRONG (max |err| 0.18-0.47 against the
+    #   CPU reference in every layer/bidirectional/batch_first combination) while
+    #   a manual unrolled cell built from matmul/sigmoid/tanh matches to 2e-06.
+    #   GRU additionally raises for a missing ``aten::_thnn_fused_gru_cell``.
+    #   Recurrent cells therefore always bounce through CPU on this stack.
+    BIREN: DeviceProfile(BIREN, "supa", plugin="torch_br", complex_fft=False, rnn=False),
     MLU: DeviceProfile(MLU, "mlu", plugin="torch_mlu"),
     # Ascend's torch_npu builds ship npu_lstm/npu_gru without inference support
     # and lack a complex STFT path, so both fallbacks are part of the profile.

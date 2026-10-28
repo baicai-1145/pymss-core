@@ -159,22 +159,36 @@ def test_profile_is_cached_until_cleared(monkeypatch):
 
 
 def test_biren_profile_matches_the_measured_birensupa_stack():
-    """BIREN106M + torch-br 1.7.0.20700: no complex stft, no fused GRU cell."""
+    """BIREN106M + torch-br 1.7.0.20700: no complex stft, no correct fused RNN."""
     profile = device_profile("supa")
     assert profile.vendor == BIREN
     assert profile.device_type == "supa"
     assert profile.complex_fft is False
-    assert profile.rnn is True
-    assert profile.blocked_rnn_ops == frozenset({"gru"})
+    # The fused _VF.lstm is silently wrong on this stack, so every cell bounces.
+    assert profile.rnn is False
+    assert profile.needs_rnn_fallback is True
 
 
 def test_rnn_op_blocked_is_per_cell():
+    # A device level rnn=False blocks every cell.
     assert rnn_op_blocked("supa", "gru") is True
     assert rnn_op_blocked("supa", "GRU") is True
-    assert rnn_op_blocked("supa", "lstm") is False
-    assert rnn_op_blocked("supa", "rnn") is False
-    # A device level rnn=False blocks every cell.
+    assert rnn_op_blocked("supa", "lstm") is True
     assert rnn_op_blocked("npu", "lstm") is True
-    assert rnn_op_blocked("npu", "gru") is True
     # Vendors with native recurrent kernels report nothing blocked.
     assert rnn_op_blocked("cuda", "gru") is False
+    assert rnn_op_blocked("cuda", "lstm") is False
+
+
+def test_rnn_blocked_selects_single_cells(monkeypatch):
+    """rnn_blocked lets a vendor keep the working cells native."""
+    from dataclasses import replace as dc_replace
+
+    from pymss_core import device as device_mod
+
+    partial = dc_replace(device_mod._PROFILES[BIREN], rnn=True, rnn_blocked=frozenset({"gru"}))
+    monkeypatch.setitem(device_mod._PROFILES, BIREN, partial)
+    device_mod.clear_device_cache()
+    assert rnn_op_blocked("supa", "gru") is True
+    assert rnn_op_blocked("supa", "lstm") is False
+    device_mod.clear_device_cache()
