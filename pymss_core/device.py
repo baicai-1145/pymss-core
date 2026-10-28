@@ -99,6 +99,9 @@ class DeviceProfile:
             ``False`` recurrent layers bounce through CPU.
         rnn_blocked: individual cells (``"lstm"``/``"gru"``/``"rnn"``) that must
             bounce through CPU although the rest of the family is native.
+        dilated_conv: dilated convolutions can be planned by the vendor kernel.
+            When ``False`` every ``dilation != (1, 1)`` conv bounces through CPU
+            (BIREN's SUDNN aborts the process otherwise).
         amp: ``torch.amp.autocast`` is usable for the device type.
         amp_dtype: dtype autocast should use; bfloat16 where the vendor has no
             float16 matmul (BIREN br10x).
@@ -112,6 +115,7 @@ class DeviceProfile:
     complex_fft: bool = True
     rnn: bool = True
     rnn_blocked: frozenset[str] = frozenset()
+    dilated_conv: bool = True
     amp: bool = True
     amp_dtype: torch.dtype = torch.float16
     channels_last: bool = True
@@ -168,7 +172,8 @@ _PROFILES: dict[str, DeviceProfile] = {
     #   ``torch.autocast("supa", dtype=torch.float16)`` raises "Current SUPA
     #   Device does not support float16. Please switch dtype to bfloat16."
     BIREN: DeviceProfile(
-        BIREN, "supa", plugin="torch_br", complex_fft=False, rnn=False, amp_dtype=torch.bfloat16
+        BIREN, "supa", plugin="torch_br", complex_fft=False, rnn=False,
+        amp_dtype=torch.bfloat16, dilated_conv=False
     ),
     MLU: DeviceProfile(MLU, "mlu", plugin="torch_mlu"),
     # Ascend's torch_npu builds ship npu_lstm/npu_gru without inference support
@@ -374,6 +379,19 @@ def rnn_op_blocked(device, op: str) -> bool:
     return str(op).lower() in profile.rnn_blocked
 
 
+def dilated_conv_supported(device=None) -> bool:
+    """Return ``True`` when the vendor can plan dilated convolutions."""
+    return device_profile(device).dilated_conv
+
+
+def dilated_conv_blocked(device, dilation) -> bool:
+    """Return ``True`` when a conv with ``dilation`` must bounce through CPU.
+
+    Only spatial dilation matters: ``(1, 1)`` is skipped by the caller.
+    """
+    return not dilated_conv_supported(device)
+
+
 def autocast_dtype(device=None) -> torch.dtype:
     """Return the autocast dtype the backend supports (float16 or bfloat16)."""
     profile = device_profile(device)
@@ -402,6 +420,8 @@ __all__ = (
     "ROCM",
     "amp_supported",
     "autocast_dtype",
+    "dilated_conv_blocked",
+    "dilated_conv_supported",
     "clear_device_cache",
     "detect_vendor",
     "device_profile",
