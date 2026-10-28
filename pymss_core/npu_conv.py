@@ -31,13 +31,9 @@ _installed = False
 
 
 def _dilation_of(conv) -> tuple[int, int]:
-    dilation = conv.dilation
-    if isinstance(dilation, int):
-        return (dilation, dilation)
-    values = tuple(int(value) for value in dilation)
-    if len(values) == 1:
-        return (values[0], values[0])
-    return (values[0], values[-1])
+    from pymss_core.device import _normalise_dilation
+
+    return _normalise_dilation(conv.dilation)
 
 
 def needs_cpu_fallback(conv, input) -> bool:
@@ -71,8 +67,56 @@ def _conv_on_cpu(conv, input):
     return out.to(device=device, dtype=dtype)
 
 
+def _functional_fallback(fn, dim: int):
+    """Wrap ``torch.nn.functional.conv{1,2,3}d`` with the CPU bounce."""
+
+    def conv(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1):
+        if _functional_needs_cpu(input, dilation):
+            return _functional_on_cpu(fn, dim, input, weight, bias, stride, padding, dilation, groups)
+        return fn(input, weight, bias, stride, padding, dilation, groups)
+
+    conv.__name__ = getattr(fn, "__name__", "conv")
+    conv.__doc__ = getattr(fn, "__doc__", None)
+    return conv
+
+
+def _functional_needs_cpu(input, dilation) -> bool:
+    if not isinstance(input, torch.Tensor):
+        return False
+    from pymss_core.device import _normalise_dilation, dilated_conv_blocked
+
+    if _normalise_dilation(dilation) == (1, 1):
+        return False
+    return dilated_conv_blocked(input.device, dilation)
+
+
+def _functional_on_cpu(fn, dim, input, weight, bias, stride, padding, dilation, groups):
+    """Run the functional conv on CPU in fp32 and move the result back."""
+    if torch.is_grad_enabled():
+        raise RuntimeError(
+            "The dilated-conv CPU fallback supports inference only; disable autograd before calling it."
+        )
+    device, dtype = input.device, input.dtype
+    out = fn(
+        input.detach().to(device="cpu", dtype=torch.float32),
+        weight.detach().to(device="cpu", dtype=torch.float32),
+        None if bias is None else bias.detach().to(device="cpu", dtype=torch.float32),
+        stride,
+        padding,
+        dilation,
+        groups,
+    )
+    return out.to(device=device, dtype=dtype)
+
+
 def install_dilated_conv_fallback():
-    """Patch ``_ConvNd.forward`` so unsupported dilated convs run on CPU."""
+    """Patch the conv entry points so unsupported dilated convs run on CPU.
+
+    Both ``_ConvNd.forward`` and ``torch.nn.functional.conv{1,2,3}d`` are hooked:
+    some model code bypasses the module and calls the functional form directly,
+    which is exactly how the first BIREN VR run still aborted after the module
+    level patch was in place.
+    """
     global _installed
     if _installed:
         return
@@ -87,6 +131,22 @@ def install_dilated_conv_fallback():
 
     forward._pymss_conv_original_forward = original
     _ConvNd.forward = forward
+
+    import torch.nn.functional as F
+
+    for name in ("conv1d", "conv2d", "conv3d"):
+        original_fn = getattr(F, name)
+        if getattr(original_fn, "_pymss_conv_original", False):
+            continue
+        wrapper = _functional_fallback(original_fn, int(name[-2]))
+        wrapper._pymss_conv_original = True
+        setattr(F, name, wrapper)
+        if hasattr(torch, name):
+            original_torch = getattr(torch, name)
+            if not getattr(original_torch, "_pymss_conv_original", False):
+                torch_wrapper = _functional_fallback(original_torch, int(name[-2]))
+                torch_wrapper._pymss_conv_original = True
+                setattr(torch, name, torch_wrapper)
     _installed = True
 
 

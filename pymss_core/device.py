@@ -100,8 +100,10 @@ class DeviceProfile:
         rnn_blocked: individual cells (``"lstm"``/``"gru"``/``"rnn"``) that must
             bounce through CPU although the rest of the family is native.
         dilated_conv: dilated convolutions can be planned by the vendor kernel.
-            When ``False`` every ``dilation != (1, 1)`` conv bounces through CPU
-            (BIREN's SUDNN aborts the process otherwise).
+        dilated_conv_allowed: symmetric dilations the kernel still accepts when
+            ``dilated_conv`` is ``False`` (BIREN's SUDNN: ``(1,1)/(2,2)/(4,4)``
+            per its own error text, but only ``(1,1)``/``(2,2)`` survived our
+            measurements, so only those stay native).
         amp: ``torch.amp.autocast`` is usable for the device type.
         amp_dtype: dtype autocast should use; bfloat16 where the vendor has no
             float16 matmul (BIREN br10x).
@@ -116,6 +118,7 @@ class DeviceProfile:
     rnn: bool = True
     rnn_blocked: frozenset[str] = frozenset()
     dilated_conv: bool = True
+    dilated_conv_allowed: frozenset[tuple[int, int]] = frozenset()
     amp: bool = True
     amp_dtype: torch.dtype = torch.float16
     channels_last: bool = True
@@ -173,7 +176,8 @@ _PROFILES: dict[str, DeviceProfile] = {
     #   Device does not support float16. Please switch dtype to bfloat16."
     BIREN: DeviceProfile(
         BIREN, "supa", plugin="torch_br", complex_fft=False, rnn=False,
-        amp_dtype=torch.bfloat16, dilated_conv=False
+        amp_dtype=torch.bfloat16, dilated_conv=False,
+        dilated_conv_allowed=frozenset({(1, 1), (2, 2)})
     ),
     MLU: DeviceProfile(MLU, "mlu", plugin="torch_mlu"),
     # Ascend's torch_npu builds ship npu_lstm/npu_gru without inference support
@@ -384,12 +388,31 @@ def dilated_conv_supported(device=None) -> bool:
     return device_profile(device).dilated_conv
 
 
+def _normalise_dilation(dilation) -> tuple[int, int]:
+    """Return ``(h, w)`` for an int / 1-tuple / 2-tuple dilation."""
+    if isinstance(dilation, int):
+        return (dilation, dilation)
+    values = tuple(int(value) for value in dilation)
+    if not values:
+        return (1, 1)
+    if len(values) == 1:
+        return (values[0], values[0])
+    return (values[0], values[1])
+
+
 def dilated_conv_blocked(device, dilation) -> bool:
     """Return ``True`` when a conv with ``dilation`` must bounce through CPU.
 
-    Only spatial dilation matters: ``(1, 1)`` is skipped by the caller.
+    A profile that supports every dilation returns ``False``; a restricted
+    profile only keeps the dilations it lists (symmetric, ``h == w``).
     """
-    return not dilated_conv_supported(device)
+    profile = device_profile(device)
+    if profile.dilated_conv:
+        return False
+    h, w = _normalise_dilation(dilation)
+    if h != w:
+        return True
+    return (h, w) not in profile.dilated_conv_allowed
 
 
 def autocast_dtype(device=None) -> torch.dtype:

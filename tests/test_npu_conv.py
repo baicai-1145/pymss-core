@@ -80,3 +80,46 @@ def test_installed_fallback_runs_the_blocked_layer_on_cpu(monkeypatch):
         torch.testing.assert_close(actual, expected, rtol=1e-6, atol=1e-6)
     finally:
         _ConvNd.forward = original
+
+
+def test_functional_conv_is_hooked_too(monkeypatch):
+    """Some models bypass nn.Conv2d and call F.conv2d directly."""
+    import torch.nn.functional as F
+
+    monkeypatch.setattr(npu_conv, "_installed", False)
+    monkeypatch.setattr(npu_conv, "dilated_conv_blocked", lambda device, dilation: True)
+    from torch.nn.modules.conv import _ConvNd
+
+    original_module_forward = _ConvNd.forward
+    original_conv2d = F.conv2d
+    torch.manual_seed(2)
+    weight = torch.randn(6, 4, 3, 3)
+    x = torch.randn(2, 4, 21, 12)
+    try:
+        npu_conv.install_dilated_conv_fallback()
+        expected = torch.conv2d(x, weight, None, 1, (4, 2), (4, 2), 1)
+        with_torch = torch.conv2d(x, weight, None, 1, (4, 2), (4, 2), 1) == expected
+        with_f = F.conv2d(x, weight, None, 1, (4, 2), (4, 2), 1)
+        assert with_torch.all() and torch.allclose(with_f, expected)
+        # Undilated calls must still reach the original implementation.
+        assert F.conv2d(x, weight, None, 1, 1, 1, 1).shape == (2, 6, 21, 12)
+    finally:
+        _ConvNd.forward = original_module_forward
+        F.conv2d = original_conv2d
+
+
+def test_blocked_predicate_keeps_the_dilations_the_kernel_supports(monkeypatch):
+    import pymss_core.device as device_mod
+    from pymss_core.device import BIREN, dilated_conv_blocked
+
+    monkeypatch.setitem(device_mod._PROFILES, BIREN, device_mod._PROFILES[BIREN])
+    device_mod.clear_device_cache()
+    # (1,1) and (2,2) are native on BIREN; asymmetric and (4,4) are not.
+    assert dilated_conv_blocked("supa", (1, 1)) is False
+    assert dilated_conv_blocked("supa", (2, 2)) is False
+    assert dilated_conv_blocked("supa", (4, 4)) is True
+    assert dilated_conv_blocked("supa", (4, 2)) is True
+    assert dilated_conv_blocked("supa", (2, 1)) is True
+    # Vendors without the limitation never bounce.
+    assert dilated_conv_blocked("cuda", (4, 2)) is False
+    device_mod.clear_device_cache()
