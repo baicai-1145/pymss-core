@@ -559,6 +559,78 @@ def std_equivalent(x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
     return torch.sqrt(var.clamp_min(0))
 
 
+def sdpa_equivalent(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attn_mask: torch.Tensor | None = None,
+    dropout_p: float = 0.0,
+    is_causal: bool = False,
+    *,
+    scale: float | None = None,
+    enable_gqa: bool = False,
+) -> torch.Tensor:
+    """``scaled_dot_product_attention`` as explicit matmuls.
+
+    BIREN's SUDNN fails to plan the fused kernel for a production roformer's batch
+    (``(862, 8, 62, 64)`` answers ``SudnnPlanBuilder.h:667 Failed to finalize
+    engine config descriptor``), and the vendor documents SDPA as bf16/fp32 only.
+    With ``dim_head`` at 64 the three matmuls are the natural formulation anyway.
+
+    Args:
+        query, key, value: ``(..., T, E)`` tensors.
+        attn_mask: Optional additive mask.
+        dropout_p: Dropout probability (0.0 in inference).
+        is_causal: Whether to apply a causal mask.
+        scale: Override for ``1/sqrt(E)``.
+        enable_gqa: Accepted for signature compatibility; GQA inputs are expected
+            to be expanded by the caller.
+
+    Returns:
+        The attention output.
+    """
+    if scale is None:
+        scale = query.shape[-1] ** -0.5
+    scores = torch.matmul(query, key.transpose(-1, -2)) * scale
+    if attn_mask is not None:
+        scores = scores + attn_mask
+    elif is_causal:
+        length_q, length_k = query.shape[-2], key.shape[-2]
+        mask = torch.ones(length_q, length_k, dtype=torch.bool, device=query.device).tril()
+        scores = scores.masked_fill(~mask, float("-inf"))
+    probs = torch.softmax(scores, dim=-1)
+    if dropout_p > 0.0:
+        probs = torch.nn.functional.dropout(probs, dropout_p)
+    return torch.matmul(probs, value)
+
+
+def install_sdpa_shim() -> bool:
+    """Replace ``F.scaled_dot_product_attention`` on vendor devices.
+
+    Returns:
+        ``True`` when the shim was installed, ``False`` when it already was.
+    """
+    if "sdpa" in _installed:
+        return False
+    import torch.nn.functional as functional
+
+    original = functional.scaled_dot_product_attention
+
+    def scaled_dot_product_attention(query, key, value, attn_mask=None, dropout_p=0.0,
+                                     is_causal=False, *, scale=None, enable_gqa=False):
+        if query.device.type in ("cpu", "meta") or query.is_cuda:
+            return original(query, key, value, attn_mask=attn_mask, dropout_p=dropout_p,
+                            is_causal=is_causal, scale=scale, enable_gqa=enable_gqa)
+        return sdpa_equivalent(query, key, value, attn_mask, dropout_p, is_causal,
+                               scale=scale, enable_gqa=enable_gqa)
+
+    scaled_dot_product_attention._vendor_shim = True
+    functional.scaled_dot_product_attention = scaled_dot_product_attention
+    torch.scaled_dot_product_attention = scaled_dot_product_attention
+    _installed.add("sdpa")
+    return True
+
+
 def complex_to_host(tensor: torch.Tensor, copy) -> torch.Tensor:
     """Copy a complex tensor with ``copy`` applied to its real/imaginary planes.
 
@@ -640,6 +712,7 @@ SHIMS = {
     "fft": install_fft_shim,
     "std": install_std_shim,
     "cpu": install_cpu_shim,
+    "sdpa": install_sdpa_shim,
 }
 
 
@@ -657,6 +730,7 @@ def install_vendor_shims(
     fft: bool = False,
     std: bool = False,
     cpu: bool = False,
+    sdpa: bool = False,
 ) -> list[str]:
     """Install the shims a device profile asks for.
 
@@ -673,6 +747,7 @@ def install_vendor_shims(
         fft: ``True`` when ``torch.fft.rfft``/``irfft`` must be replaced.
         std: ``True`` when ``Tensor.std`` must be rebuilt from ``var``.
         cpu: ``True`` when a non-contiguous host copy must go via ``contiguous``.
+        sdpa: ``True`` when fused attention must be expressed as matmuls.
 
     Returns:
         The shim names that were installed by this call.
@@ -702,6 +777,8 @@ def install_vendor_shims(
         wanted.append("std")
     if cpu:
         wanted.append("cpu")
+    if sdpa:
+        wanted.append("sdpa")
     installed = []
     for name in wanted:
         if SHIMS[name]():

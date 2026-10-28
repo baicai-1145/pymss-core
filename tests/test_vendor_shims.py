@@ -375,3 +375,32 @@ class TestComplexToHost:
         view = base[:, ::2]
         out = complex_to_host(view, lambda t: t)
         assert torch.equal(out, view.clone())
+
+
+class TestSdpaEquivalent:
+    """The fused kernel cannot be planned for a production roformer's batch."""
+
+    def test_matches_torch_math_backend(self):
+        from pymss_core.vendor_shims import sdpa_equivalent
+
+        torch.manual_seed(0)
+        q, k, v = (torch.randn(2, 4, 6, 8) for _ in range(3))
+        want = torch.nn.functional.scaled_dot_product_attention(q, k, v)
+        assert torch.allclose(sdpa_equivalent(q, k, v), want, atol=1e-5)
+
+    def test_scale_and_causal(self):
+        from pymss_core.vendor_shims import sdpa_equivalent
+
+        torch.manual_seed(0)
+        q, k, v = (torch.randn(1, 2, 5, 4) for _ in range(3))
+        want = torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True, scale=0.3)
+        assert torch.allclose(sdpa_equivalent(q, k, v, is_causal=True, scale=0.3), want, atol=1e-5)
+
+    def test_additive_mask(self):
+        from pymss_core.vendor_shims import sdpa_equivalent
+
+        torch.manual_seed(0)
+        q, k, v = (torch.randn(1, 2, 3, 4) for _ in range(3))
+        mask = torch.zeros(3, 3).masked_fill(torch.ones(3, 3, dtype=torch.bool).tril().logical_not(), float("-inf"))
+        want = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+        assert torch.allclose(sdpa_equivalent(q, k, v, mask), want, atol=1e-5)
