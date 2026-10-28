@@ -275,12 +275,66 @@ def install_complex_reshape_shim() -> bool:
     return True
 
 
+def group_norm_equivalent(x: torch.Tensor, num_groups: int, weight=None, bias=None, eps: float = 1e-5) -> torch.Tensor:
+    """``F.group_norm`` built from reshape/mean/var (exact, all device kernels).
+
+    GroupNorm.cpp on BIREN rejects some channel counts with
+    ``SUPA Kernel Launch Error, ErrorCode: 801, operation not supported``.
+
+    Args:
+        x: Input tensor ``(N, C, ...)``.
+        num_groups: Number of groups.
+        weight: Optional per-channel scale.
+        bias: Optional per-channel shift.
+        eps: Numerical floor for the variance.
+
+    Returns:
+        The normalised tensor.
+    """
+    n = x.shape[0]
+    flat = x.reshape(n, num_groups, -1)
+    mean = flat.mean(dim=-1, keepdim=True)
+    var = flat.var(dim=-1, unbiased=False, keepdim=True)
+    out = ((flat - mean) / torch.sqrt(var + eps)).reshape(x.shape)
+    if weight is not None:
+        shape = (1, -1) + (1,) * (x.dim() - 2)
+        out = out * weight.reshape(shape)
+        if bias is not None:
+            out = out + bias.reshape(shape)
+    return out
+
+
+def install_group_norm_shim() -> bool:
+    """Replace ``F.group_norm`` on vendor devices.
+
+    Returns:
+        ``True`` when the shim was installed, ``False`` when it already was.
+    """
+    if "group_norm" in _installed:
+        return False
+    import torch.nn.functional as F
+
+    original = F.group_norm
+
+    def group_norm(input, num_groups, weight=None, bias=None, eps=1e-5):
+        device = getattr(input, "device", None)
+        if device is None or device.type in ("cpu", "meta"):
+            return original(input, num_groups, weight, bias, eps)
+        return group_norm_equivalent(input, num_groups, weight, bias, eps)
+
+    group_norm._vendor_shim = True
+    F.group_norm = group_norm
+    _installed.add("group_norm")
+    return True
+
+
 #: Shim name -> installer.
 SHIMS = {
     "complex_mul": install_complex_mul_shim,
     "complex_reshape": install_complex_reshape_shim,
     "window": install_window_shim,
     "glu": install_glu_shim,
+    "group_norm": install_group_norm_shim,
 }
 
 
@@ -291,6 +345,7 @@ def install_vendor_shims(
     window_on_device: bool = True,
     glu: bool = True,
     complex_reshape: bool = True,
+    group_norm: bool = True,
 ) -> list[str]:
     """Install the shims a device profile asks for.
 
@@ -300,6 +355,7 @@ def install_vendor_shims(
         window_on_device: ``False`` when windows cannot be built on the device.
         glu: ``True`` when ``F.glu`` should be replaced by its elementwise form.
         complex_reshape: ``False`` when complex tensors cannot be reshaped.
+        group_norm: ``True`` when ``F.group_norm`` should be replaced.
 
     Returns:
         The shim names that were installed by this call.
@@ -315,6 +371,8 @@ def install_vendor_shims(
         wanted.append("window")
     if glu:
         wanted.append("glu")
+    if group_norm:
+        wanted.append("group_norm")
     installed = []
     for name in wanted:
         if SHIMS[name]():

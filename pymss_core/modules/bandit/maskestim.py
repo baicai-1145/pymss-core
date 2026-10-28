@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 from torch import nn
 from torch.nn.modules import activation
 def _bsrnn_utils():
@@ -86,11 +87,22 @@ class OverlappingMaskEstimationModule(MaskEstimationModuleBase):
             masks = torch.view_as_complex(torch.zeros(b, self.in_channels, self.n_freq, t, 2, device=q.device, dtype=torch.float32))
         else:
             masks = torch.zeros(b, self.in_channels, self.n_freq, t, device=q.device, dtype=dtype)
+        # BIREN cannot write into tensor slices in place, so each band is
+        # zero-padded to the full frequency axis and summed instead; the bands may
+        # overlap, which makes padding-and-adding the exact equivalent.
+        total = None
         for im in range(n_bands):
             fstart, fend = self.band_specs[im]
             mask = mask_list[im] if mask_list is not None else self.compute_mask(q, im)
             if self.use_freq_weights: mask = mask * self.get_buffer(f'freq_weights/{im}')[:, None]
-            masks[:, :, fstart:fend, :] += mask
+            if mask.shape[2] != fend - fstart or fend > self.n_freq:
+                total = None
+                break
+            if fstart or fend < self.n_freq:
+                mask = F.pad(mask, (0, 0, fstart, self.n_freq - fend))
+            total = mask if total is None else total + mask
+        if total is not None:
+            masks = total
         return masks
 class MaskEstimationModule(OverlappingMaskEstimationModule):
     def __init__(self, band_specs, emb_dim, mlp_dim, in_channels=None, in_channel=None, hidden_activation="Tanh", hidden_activation_kwargs=None, complex_mask=True, **kwargs):

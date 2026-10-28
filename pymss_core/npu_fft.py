@@ -46,7 +46,27 @@ _TRUSTED_FFT_MIN = 1024
 _DFT_CACHE: dict[tuple[int, str, torch.dtype], tuple[torch.Tensor, torch.Tensor]] = {}
 
 
-def vendor_fft_trusted(n: int) -> bool:
+_VENDOR_FFT_STATUS: dict[tuple[int, str], bool] = {}
+
+
+def _probe_vendor_fft(n: int, device) -> bool:
+    """Ask the vendor kernel to round-trip a known signal and check the answer."""
+    try:
+        x = torch.linspace(0.0, 1.0, n, device=device, dtype=torch.float32).reshape(1, n)
+        spec = torch.fft.rfft(x, dim=-1)
+        planes = torch.view_as_real(spec)
+        if not bool(torch.isfinite(planes).all()):
+            return False
+        if float(planes.abs().max()) == 0.0:
+            return False
+        back = torch.fft.irfft(spec, n=n, dim=-1)
+        ref = x.cpu()
+        return bool(torch.allclose(back.cpu(), ref, atol=1e-3, rtol=1e-3))
+    except Exception:  # noqa: BLE001 - any vendor failure means "do not trust"
+        return False
+
+
+def vendor_fft_trusted(n: int, device=None) -> bool:
     """Return ``True`` when the vendor FFT can be used for size ``n``.
 
     BIREN's FFT is not reliable for every shape: size 1411 fails to build a plan
@@ -58,10 +78,25 @@ def vendor_fft_trusted(n: int) -> bool:
     Args:
         n: Transform length.
 
+    Args:
+        n: Transform length.
+        device: When given, a one-off round-trip probe decides whether this
+            device really computes this size correctly (BIREN answered zeros
+            for shapes the size alone could not predict).
+
     Returns:
         ``True`` when the vendor kernel is trusted for this size.
     """
-    return n >= _TRUSTED_FFT_MIN and (n & (n - 1)) == 0
+    if n < _TRUSTED_FFT_MIN or (n & (n - 1)) != 0:
+        return False
+    if device is None:
+        return True
+    key = (n, str(device))
+    cached = _VENDOR_FFT_STATUS.get(key)
+    if cached is None:
+        cached = _probe_vendor_fft(n, device)
+        _VENDOR_FFT_STATUS[key] = cached
+    return cached
 
 
 def _dft_matrices(n: int, device, dtype) -> tuple[torch.Tensor, torch.Tensor]:
@@ -164,7 +199,7 @@ def stft_npu(
     frames = flat.as_strided((*lead_n, n_frames, n_fft), (*flat.stride()[:-1], hop, 1)).contiguous() * window  # (N, 1, T, n_fft)
     # torch.stft(normalized=True) scales the plain FFT output by sqrt(1/n_fft).
     frames_flat = frames.squeeze(1)
-    if vendor_fft_trusted(n_fft):
+    if vendor_fft_trusted(n_fft, frames_flat.device):
         spec = torch.fft.rfft(frames_flat, dim=-1)  # (N, T, F)
     else:
         spec = _rfft_matmul(frames_flat, n_fft)
@@ -212,7 +247,7 @@ def istft_npu(
     flat_spec = spec.reshape(-1, freqs, n_frames)
     # torch_npu runs complex64 transposes on the AI_CPU; permute real/imag planes instead.
     flat_spec = torch.view_as_complex(torch.view_as_real(flat_spec).permute(0, 2, 1, 3).contiguous())  # (N, T, F)
-    if vendor_fft_trusted(n_fft):
+    if vendor_fft_trusted(n_fft, flat_spec.device):
         frames = torch.fft.irfft(flat_spec, n=n_fft, dim=-1)  # (N, T, n_fft)
     else:
         frames = _irfft_matmul(flat_spec, n_fft)

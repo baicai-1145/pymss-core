@@ -183,7 +183,8 @@ class Apollo(MpsBackendMixin, nn.Module):
         spec = self._stft(input)
         count, width = self._uniform_band_prefix()
         prefix_spec = spec[:, : count * width].reshape(spec.shape[0], count, width, -1)
-        prefix_power = (prefix_spec.abs().pow(2).sum(2) + self.eps).sqrt()
+        # BIREN has no complex abs(); the power is the same on the real planes.
+        prefix_power = (torch.view_as_real(prefix_spec).pow(2).sum(-1).sum(2) + self.eps).sqrt()
         prefix_norm = _complex_div_by_real(prefix_spec, prefix_power.unsqueeze(2))
         tail_norm, tail_power, band_idx = [], [], count * width
         for width in self.band_width[count:]:

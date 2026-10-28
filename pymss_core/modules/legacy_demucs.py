@@ -323,7 +323,19 @@ def overlap_and_add(signal, frame_step):
     output_subframes = (frame_step * (frames - 1) + frame_length) // subframe_length
     frame = torch.arange(0, output_subframes, device=signal.device).unfold(0, subframes_per_frame, subframe_step)
     result = signal.new_zeros(*outer_dimensions, output_subframes, subframe_length)
-    result.index_add_(-2, frame.long().contiguous().view(-1), signal.view(*outer_dimensions, -1, subframe_length))
+    flat_index = frame.long().contiguous().view(-1)
+    flat_signal = signal.view(*outer_dimensions, -1, subframe_length)
+    from pymss_core.device import scatter_add_blocked
+
+    if scatter_add_blocked(signal.device) or signal.dim() > 3:
+        # BIREN aborts ('vector::reserve') on index_add_ with 5-D sources, so the
+        # overlap-add runs as a one-hot matrix multiply instead: same values, no
+        # scatter kernel.
+        from pymss_core.vendor_shims import scatter_add_equivalent
+
+        result = scatter_add_equivalent(flat_signal.movedim(-2, -2), flat_index, -2, output_subframes)
+        return result.view(*outer_dimensions, -1)
+    result.index_add_(-2, flat_index, flat_signal)
     return result.view(*outer_dimensions, -1)
 class LegacyConvTasNet(nn.Module):
     def __init__(self, sources=None, N=256, L=20, B=256, H=512, P=3, X=8, R=4, C=4, audio_channels=2, norm_type="gLN", causal=False, mask_nonlinear="relu", samplerate=44100, segment_length=44100 * 2 * 4, **_):

@@ -45,14 +45,17 @@ class TestShimInstallation:
 
     def test_profile_flags_choose_the_shims(self):
         reset_shims()
-        installed = install_vendor_shims("supa", complex_mul=False, window_on_device=False, glu=True)
-        assert set(installed) == {"complex_mul", "window", "glu"}
+        installed = install_vendor_shims(
+            "supa", complex_mul=False, window_on_device=False, glu=True,
+            complex_reshape=False, group_norm=True,
+        )
+        assert set(installed) == {"complex_mul", "window", "glu", "complex_reshape", "group_norm"}
         assert install_vendor_shims("supa", complex_mul=False, window_on_device=False, glu=True) == []
         reset_shims()
 
     def test_window_shim_builds_on_host_for_device_targets(self):
         reset_shims()
-        install_vendor_shims("supa", complex_mul=False, window_on_device=False, glu=False)
+        install_vendor_shims("supa", complex_mul=False, window_on_device=False, glu=False, group_norm=False)
         # "meta" keeps this test device-independent while exercising the shim path.
         window = torch.hann_window(8, device="meta")
         assert window.device.type == "meta"
@@ -169,3 +172,26 @@ class TestComplexReshape:
         assert install_complex_reshape_shim() is True
         assert install_complex_reshape_shim() is False
         reset_shims()
+
+
+class TestGroupNormEquivalent:
+    def test_matches_the_fused_kernel(self):
+        import torch.nn.functional as F
+
+        from pymss_core.vendor_shims import group_norm_equivalent
+
+        for shape, groups in (((2, 32, 16, 16), 8), ((2, 8, 5), 4), ((1, 3, 7, 9), 3)):
+            torch.manual_seed(0)
+            x = torch.randn(*shape)
+            weight, bias = torch.randn(shape[1]), torch.randn(shape[1])
+            want = F.group_norm(x, groups, weight, bias, 1e-5)
+            got = group_norm_equivalent(x, groups, weight, bias, 1e-5)
+            assert torch.allclose(got, want, atol=1e-5)
+
+    def test_without_affine(self):
+        import torch.nn.functional as F
+
+        from pymss_core.vendor_shims import group_norm_equivalent
+
+        x = torch.randn(2, 6, 4, 4)
+        assert torch.allclose(group_norm_equivalent(x, 3), F.group_norm(x, 3), atol=1e-5)
