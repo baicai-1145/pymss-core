@@ -166,7 +166,31 @@ def istft_npu(
     return out / norm.clamp_min(_TINY)
 
 
-def masked_spectrum(mask: torch.Tensor, spec: torch.Tensor) -> torch.Tensor:
+def complex_to_numpy_cpu(spec: torch.Tensor) -> "np.ndarray":
+    """Copy a complex tensor to the host through its real planes.
+
+    BIREN cannot copy complex tensors device->host at all:
+
+        RuntimeError: ERROR (BR TORCH INTERNAL) ... ErrorCode: 101, invalid device
+
+    while copying ``view_as_real(spec)`` works, so the real planes travel and the
+    complex view is rebuilt on the host.
+
+    Args:
+        spec: Real or complex tensor on any device.
+
+    Returns:
+        A numpy array with the same values.
+    """
+    if not spec.is_complex():
+        return spec.detach().cpu().numpy()
+    planes = torch.view_as_real(spec.detach()).contiguous().cpu()
+    return torch.view_as_complex(planes).numpy()
+
+
+def masked_spectrum(
+    mask: torch.Tensor, spec: torch.Tensor, *, to_cpu: bool = False
+) -> torch.Tensor | "np.ndarray":
     """Multiply a real mask into a complex spectrum.
 
     BIREN has no pointwise kernel for ``complex64 * float32``: it tries to cast
@@ -187,11 +211,18 @@ def masked_spectrum(mask: torch.Tensor, spec: torch.Tensor) -> torch.Tensor:
         ``mask * spec`` with the spectrum's dtype.
     """
     if not spec.is_complex():
-        return mask * spec
+        product = mask * spec
+        return complex_to_numpy_cpu(product) if to_cpu else product
     planes = torch.view_as_real(spec)  # (..., 2)
-    while mask.dim() < planes.dim():
+    for _ in range(planes.dim()):
+        if mask.dim() >= planes.dim():
+            break
         mask = mask.unsqueeze(-1)
-    return torch.view_as_complex((mask * planes).contiguous())
+    product = (mask * planes).contiguous()
+    if to_cpu:
+        # Never copy a complex tensor off the device (see complex_to_numpy_cpu).
+        return torch.view_as_complex(product.cpu()).numpy()
+    return torch.view_as_complex(product)
 
 
 def torch_stft_blocked(device) -> bool:

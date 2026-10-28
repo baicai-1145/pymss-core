@@ -1,7 +1,14 @@
+import numpy as np
 import pytest
 import torch
 
-from pymss_core.npu_fft import hann_window_npu, istft_npu, masked_spectrum, stft_npu
+from pymss_core.npu_fft import (
+    complex_to_numpy_cpu,
+    hann_window_npu,
+    istft_npu,
+    masked_spectrum,
+    stft_npu,
+)
 
 
 @pytest.mark.parametrize("n_fft,hop,length", [(16, 4, 97), (16, 7, 97), (15, 4, 98), (512, 128, 1027), (1024, 320, 2051)])
@@ -97,3 +104,26 @@ class TestMaskedSpectrum:
         mask = torch.rand(1, 5, 7)
         spec = torch.randn(3, 5, 7, dtype=torch.complex64)
         assert masked_spectrum(mask, spec).shape == (3, 5, 7)
+
+
+class TestComplexHostCopy:
+    """BIREN raises 'ErrorCode: 101, invalid device' for complex device->host copies."""
+
+    def test_complex_to_numpy_cpu_round_trips_values(self):
+        spec = torch.randn(2, 5, 7, dtype=torch.complex64)
+        got = complex_to_numpy_cpu(spec)
+        assert got.dtype == np.complex64
+        assert (got == spec.numpy()).all()
+
+    def test_masked_spectrum_to_cpu_matches_reference(self):
+        torch.manual_seed(3)
+        mask = torch.rand(2, 5, 7)
+        spec = torch.randn(2, 5, 7, dtype=torch.complex64)
+        got = masked_spectrum(mask, spec, to_cpu=True)
+        want = (mask.to(torch.complex64) * spec).numpy()
+        assert (got == want).all()
+
+    def test_masked_spectrum_to_cpu_on_real_input(self):
+        mask = torch.rand(2, 5, 7)
+        spec = torch.randn(2, 5, 7)
+        assert (masked_spectrum(mask, spec, to_cpu=True) == (mask * spec).numpy()).all()
