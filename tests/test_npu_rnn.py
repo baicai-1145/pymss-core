@@ -135,3 +135,31 @@ def test_cpu_fallback_handles_amp_inputs(patched_runtime, monkeypatch, kind, pac
     else:
         torch.testing.assert_close(actual_hidden, expected_hidden.to(dtype=dtype))
     assert model.weight_ih_l0.dtype == original_dtype
+
+
+def test_blocked_cell_falls_back_while_native_cell_stays_on_device(patched_runtime, monkeypatch):
+    """BIREN ships native LSTM but no fused GRU cell: only the GRU bounces."""
+    monkeypatch.setattr(npu_rnn, "_needs_cpu_fallback", lambda value: False)
+    monkeypatch.setattr(npu_rnn, "rnn_op_blocked", lambda device, op: op == "gru")
+    calls = []
+    original = npu_rnn._NpuRnnCpuFallback.forward
+
+    def spy(self, input, hx=None):
+        calls.append(type(self._rnn).__name__)
+        return original(self, input, hx)
+
+    monkeypatch.setattr(npu_rnn._NpuRnnCpuFallback, "forward", spy)
+    wave = torch.randn(2, 5, 3)
+    torch.manual_seed(0)
+    lstm = nn.LSTM(3, 4, batch_first=True)
+    gru = nn.GRU(3, 4, batch_first=True)
+    with torch.no_grad():
+        expected_lstm, _ = lstm(wave)
+        expected_gru, _ = gru(wave)
+    patched_runtime.install_npu_rnn_fallback()
+    with torch.no_grad():
+        actual_lstm, _ = lstm(wave)
+        actual_gru, _ = gru(wave)
+    torch.testing.assert_close(actual_lstm, expected_lstm)
+    torch.testing.assert_close(actual_gru, expected_gru)
+    assert calls == ["GRU"]

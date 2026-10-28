@@ -97,6 +97,8 @@ class DeviceProfile:
             device.  When ``False`` the ``torch.fft`` based fallback is used.
         rnn: ``nn.LSTM``/``nn.GRU``/``nn.RNN`` run natively on the device.  When
             ``False`` recurrent layers bounce through CPU.
+        rnn_blocked: individual cells (``"lstm"``/``"gru"``/``"rnn"``) that must
+            bounce through CPU although the rest of the family is native.
         amp: ``torch.amp.autocast`` is usable for the device type.
         channels_last: ``channels_last`` memory format is beneficial/supported.
         multi_device: more than one device index is usable.
@@ -107,6 +109,7 @@ class DeviceProfile:
     plugin: str | None = None
     complex_fft: bool = True
     rnn: bool = True
+    rnn_blocked: frozenset[str] = frozenset()
     amp: bool = True
     channels_last: bool = True
     multi_device: bool = True
@@ -122,6 +125,11 @@ class DeviceProfile:
     @property
     def needs_rnn_fallback(self) -> bool:
         return not self.rnn
+
+    @property
+    def blocked_rnn_ops(self) -> frozenset[str]:
+        """Recurrent cells that must bounce through CPU even when ``rnn`` is set."""
+        return frozenset() if not self.rnn else self.rnn_blocked
 
     @property
     def supports_amp(self) -> bool:
@@ -141,7 +149,11 @@ _PROFILES: dict[str, DeviceProfile] = {
     ILUVATAR: DeviceProfile(ILUVATAR, "cuda"),
     METAX: DeviceProfile(METAX, "cuda"),
     ENFLAME: DeviceProfile(ENFLAME, "gcu", plugin="torch_gcu"),
-    BIREN: DeviceProfile(BIREN, "supa", plugin="torch_br"),
+    # Measured on BIREN106M + torch 2.7.0+cpu / torch-br 1.7.0.20700 (SUPA 1.9.0):
+    # ``stft(return_complex=True)`` raises "does not support return_complex=True
+    # now", while the rfft-based composition matches torch to 9.5e-07; GRU hits
+    # an unimplemented ``aten::_thnn_fused_gru_cell`` although LSTM is native.
+    BIREN: DeviceProfile(BIREN, "supa", plugin="torch_br", complex_fft=False, rnn_blocked=frozenset({"gru"})),
     MLU: DeviceProfile(MLU, "mlu", plugin="torch_mlu"),
     # Ascend's torch_npu builds ship npu_lstm/npu_gru without inference support
     # and lack a complex STFT path, so both fallbacks are part of the profile.
@@ -327,6 +339,19 @@ def rnn_fallback_required(device=None) -> bool:
     return device_profile(device).needs_rnn_fallback
 
 
+def rnn_op_blocked(device, op: str) -> bool:
+    """Return ``True`` when the recurrent cell ``op`` must bounce through CPU.
+
+    ``op`` is the lowercase cell name (``"lstm"``, ``"gru"``, ``"rnn"``).  A
+    device level ``rnn=False`` blocks every cell; otherwise only the cells listed
+    in :attr:`DeviceProfile.rnn_blocked` are affected.
+    """
+    profile = device_profile(device)
+    if not profile.rnn:
+        return True
+    return str(op).lower() in profile.rnn_blocked
+
+
 def amp_supported(device=None) -> bool:
     """Return ``True`` when autocast is usable on ``device``."""
     return device_profile(device).supports_amp
@@ -356,4 +381,5 @@ __all__ = (
     "profile_for_alias",
     "requires_plugin",
     "rnn_fallback_required",
+    "rnn_op_blocked",
 )

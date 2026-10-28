@@ -18,7 +18,7 @@ from __future__ import annotations
 from functools import wraps
 
 import torch
-from pymss_core.device import rnn_fallback_required
+from pymss_core.device import rnn_fallback_required, rnn_op_blocked
 from torch import nn
 from torch.nn.utils.rnn import PackedSequence
 
@@ -62,10 +62,27 @@ def _needs_cpu_fallback(input):
     return isinstance(tensor, torch.Tensor) and rnn_fallback_required(tensor.device)
 
 
+def _cell_name(module) -> str:
+    """Lowercase cell name of ``module`` (``"lstm"``, ``"gru"``, ``"rnn"``)."""
+    return type(module).__name__.lower()
+
+
+def _op_blocked(input, module) -> bool:
+    """Return ``True`` when this cell is missing on the device though others work.
+
+    BIREN exposes native ``nn.LSTM`` but no ``aten::_thnn_fused_gru_cell``, so
+    the fallback has to be decided per cell rather than per device.
+    """
+    tensor = input.data if isinstance(input, PackedSequence) else input
+    if not isinstance(tensor, torch.Tensor):
+        return False
+    return rnn_op_blocked(tensor.device, _cell_name(module))
+
+
 def _patched_rnn_forward(original_forward):
     @wraps(original_forward)
     def forward(self, input, hx=None):
-        if not _needs_cpu_fallback(input):
+        if not _needs_cpu_fallback(input) and not _op_blocked(input, self):
             return original_forward(self, input) if hx is None else original_forward(self, input, hx)
         return _NpuRnnCpuFallback(self, original_forward)(input, hx)
 
@@ -77,8 +94,9 @@ def install_rnn_cpu_fallback():
     """Patch recurrent forwards wherever the backend lacks native RNN kernels.
 
     Covers Ascend NPU (``npu_lstm``/``npu_gru`` are inference-incomplete) and any
-    other accelerator whose profile reports ``rnn=False``; native paths on other
-    devices are untouched.
+    other accelerator whose profile reports ``rnn=False``; single cells listed
+    in ``DeviceProfile.rnn_blocked`` (BIREN's GRU) are handled per instance.
+    Native paths on other devices are untouched.
     """
     global _installed
     if _installed:
