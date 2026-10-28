@@ -23,6 +23,8 @@ padding.
 """
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 import torch
@@ -37,6 +39,72 @@ _TINY = 1e-11
 def hann_window_npu(window_length: int, *, device, dtype=torch.float32, periodic: bool = True) -> torch.Tensor:
     """``torch.hann_window`` that avoids the device-side default-dtype bug."""
     return torch.hann_window(window_length, periodic=periodic, dtype=dtype, device="cpu").to(device=device)
+
+#: Vendor FFT sizes that are trusted; everything else uses the exact DFT matmul.
+_TRUSTED_FFT_MIN = 1024
+
+_DFT_CACHE: dict[tuple[int, str, torch.dtype], tuple[torch.Tensor, torch.Tensor]] = {}
+
+
+def vendor_fft_trusted(n: int) -> bool:
+    """Return ``True`` when the vendor FFT can be used for size ``n``.
+
+    BIREN's FFT is not reliable for every shape: size 1411 fails to build a plan
+    ("sufft build plan failed") and the 9-bin spectrum of a 16-point STFT comes
+    back as all zeros -- silently.  Large power-of-two sizes (2048 for the VR
+    models) are proven correct, so those keep the fast path and everything else
+    goes through an exact DFT matrix multiply.
+
+    Args:
+        n: Transform length.
+
+    Returns:
+        ``True`` when the vendor kernel is trusted for this size.
+    """
+    return n >= _TRUSTED_FFT_MIN and (n & (n - 1)) == 0
+
+
+def _dft_matrices(n: int, device, dtype) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return the cached ``cos``/``sin`` DFT basis for length ``n``."""
+    key = (n, str(device), dtype)
+    cached = _DFT_CACHE.get(key)
+    if cached is None:
+        steps = torch.arange(n, device=device, dtype=torch.float64)
+        bins = torch.arange(n // 2 + 1, device=device, dtype=torch.float64)
+        angle = (2.0 * math.pi / n) * torch.outer(bins, steps)
+        cached = (angle.cos().to(dtype), angle.sin().to(dtype))
+        _DFT_CACHE[key] = cached
+    return cached
+
+
+def _rfft_matmul(x: torch.Tensor, n: int) -> torch.Tensor:
+    """``rfft`` by DFT matrix multiply (real kernels only)."""
+    cos, sin = _dft_matrices(n, x.device, x.dtype)
+    lead = x.shape[:-1]
+    flat = x.reshape(-1, n)
+    real = flat @ cos.transpose(0, 1)
+    imag = -(flat @ sin.transpose(0, 1))
+    bins = cos.shape[0]
+    planes = torch.stack((real, imag), dim=-1).reshape(*lead, bins, 2).contiguous()
+    return torch.view_as_complex(planes)
+
+
+def _irfft_matmul(spec: torch.Tensor, n: int) -> torch.Tensor:
+    """``irfft`` by DFT matrix multiply (real kernels only)."""
+    real_dtype = spec.real.dtype
+    cos, sin = _dft_matrices(n, spec.device, real_dtype)
+    bins = spec.shape[-1]
+    weight = torch.full((bins,), 2.0, device=spec.device, dtype=real_dtype)
+    weight[0] = 1.0
+    if n % 2 == 0 and bins == n // 2 + 1:
+        weight[-1] = 1.0
+    lead = spec.shape[:-1]
+    planes = torch.view_as_real(spec.reshape(-1, bins).contiguous())
+    weighted_real = planes[..., 0] * weight
+    weighted_imag = planes[..., 1] * weight
+    out = (weighted_real @ cos - weighted_imag @ sin) / n
+    return out.reshape(*lead, n)
+
 
 def _fit_window(window: torch.Tensor, n_fft: int, win_length: int, device, dtype) -> torch.Tensor:
     window = window.to(device=device, dtype=dtype)
@@ -95,7 +163,11 @@ def stft_npu(
     n_frames = (length_n - n_fft) // hop + 1
     frames = flat.as_strided((*lead_n, n_frames, n_fft), (*flat.stride()[:-1], hop, 1)).contiguous() * window  # (N, 1, T, n_fft)
     # torch.stft(normalized=True) scales the plain FFT output by sqrt(1/n_fft).
-    spec = torch.fft.rfft(frames.squeeze(1), dim=-1)  # (N, T, F)
+    frames_flat = frames.squeeze(1)
+    if vendor_fft_trusted(n_fft):
+        spec = torch.fft.rfft(frames_flat, dim=-1)  # (N, T, F)
+    else:
+        spec = _rfft_matmul(frames_flat, n_fft)
     if normalized:
         spec = spec * (1.0 / n_fft) ** 0.5
     # torch_npu runs complex64 transposes on the AI_CPU (~20ms at this size);
@@ -140,7 +212,10 @@ def istft_npu(
     flat_spec = spec.reshape(-1, freqs, n_frames)
     # torch_npu runs complex64 transposes on the AI_CPU; permute real/imag planes instead.
     flat_spec = torch.view_as_complex(torch.view_as_real(flat_spec).permute(0, 2, 1, 3).contiguous())  # (N, T, F)
-    frames = torch.fft.irfft(flat_spec, n=n_fft, dim=-1)  # (N, T, n_fft) contiguous
+    if vendor_fft_trusted(n_fft):
+        frames = torch.fft.irfft(flat_spec, n=n_fft, dim=-1)  # (N, T, n_fft)
+    else:
+        frames = _irfft_matmul(flat_spec, n_fft)
     frames = frames * window
     batch = frames.shape[0]
     out_len = (n_frames - 1) * hop + n_fft
@@ -262,4 +337,4 @@ def torch_stft_blocked(device) -> bool:
     return fft_fallback_required(device)
 
 
-__all__ = ["hann_window_npu", "istft_npu", "stft_npu", "torch_stft_blocked"]
+__all__ = ["hann_window_npu", "istft_npu", "stft_npu", "torch_stft_blocked", "vendor_fft_trusted"]

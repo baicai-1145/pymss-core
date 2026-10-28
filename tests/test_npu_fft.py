@@ -3,12 +3,15 @@ import pytest
 import torch
 
 from pymss_core.npu_fft import (
+    _irfft_matmul,
+    _rfft_matmul,
     complex_to_numpy_cpu,
     hann_window_npu,
     istft_npu,
     masked_spectrum,
     numpy_complex_to_device,
     stft_npu,
+    vendor_fft_trusted,
 )
 
 
@@ -143,3 +146,35 @@ class TestComplexHostUpload:
     def test_real_input_takes_the_direct_path(self):
         array = np.zeros((2, 3), dtype=np.float32)
         assert numpy_complex_to_device(array, "cpu").dtype == torch.float32
+
+
+class TestExactDftFallback:
+    """The vendor FFT silently returns zeros for some shapes (n=16, 9 bins)."""
+
+    @pytest.mark.parametrize("n", [16, 32, 512, 1000, 1411])
+    def test_matmul_rfft_matches_torch(self, n):
+        x = torch.randn(3, n)
+        got = _rfft_matmul(x, n)
+        want = torch.fft.rfft(x, dim=-1)
+        assert torch.allclose(got, want, atol=2e-3)
+
+    @pytest.mark.parametrize("n", [16, 32, 512, 1000, 1411])
+    def test_matmul_irfft_round_trips(self, n):
+        x = torch.randn(3, n)
+        spec = torch.fft.rfft(x, dim=-1)
+        back = _irfft_matmul(spec, n)
+        assert back.shape == x.shape
+        assert torch.allclose(back, x, atol=2e-3)
+
+    def test_trusted_sizes_are_large_powers_of_two(self):
+        assert vendor_fft_trusted(2048) is True
+        assert vendor_fft_trusted(4096) is True
+        assert vendor_fft_trusted(1411) is False
+        assert vendor_fft_trusted(1023) is False
+        assert vendor_fft_trusted(16) is False
+
+    def test_stft_npu_is_exact_for_an_untrusted_size(self):
+        x = torch.randn(1, 1, 64)
+        got = stft_npu(x, 16, 4, window=torch.hann_window(16))
+        want = torch.stft(x.reshape(-1, 64), 16, 4, window=torch.hann_window(16), return_complex=True)
+        assert torch.allclose(got, want, atol=2e-3)
