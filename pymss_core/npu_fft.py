@@ -125,10 +125,17 @@ def _dft_matrices(n: int, device, dtype) -> tuple[torch.Tensor, torch.Tensor]:
     key = (n, str(device), dtype)
     cached = _DFT_CACHE.get(key)
     if cached is None:
-        steps = torch.arange(n, device=device, dtype=torch.float64)
-        bins = torch.arange(n // 2 + 1, device=device, dtype=torch.float64)
+        # Build the basis on the host: float64 on BIREN is emulated and a
+        # (2049, 4096) double matmul basis stalled scnet for minutes.
+        steps = torch.arange(n, dtype=torch.float64)
+        bins = torch.arange(n // 2 + 1, dtype=torch.float64)
         angle = (2.0 * math.pi / n) * torch.outer(bins, steps)
-        cached = (angle.cos().to(dtype), angle.sin().to(dtype))
+        cos = angle.cos().to(dtype)
+        sin = angle.sin().to(dtype)
+        if str(device) != "cpu":
+            cos = cos.to(device)
+            sin = sin.to(device)
+        cached = (cos, sin)
         _DFT_CACHE[key] = cached
     return cached
 

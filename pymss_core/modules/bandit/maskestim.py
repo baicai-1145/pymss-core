@@ -106,14 +106,19 @@ class OverlappingMaskEstimationModule(MaskEstimationModuleBase):
                 # Accumulate in real/imaginary space: complex zeros cannot be
                 # allocated on BIREN. Real masks join with a trailing singleton.
                 mask = torch.view_as_real(mask.contiguous()) if mask.is_complex() else mask.unsqueeze(-1)
-            if fstart or fend < self.n_freq:
-                # F.pad maps to a padding kernel BIREN rejects ('Unsupported BR type
-                # for ScalarType: 0'); cat of zeros is the same and always works.
-                b_, c_, _, t_ = mask.shape[:4]
-                tail = mask.shape[4:]
-                left = mask.new_zeros(b_, c_, fstart, t_, *tail)
-                right = mask.new_zeros(b_, c_, self.n_freq - fend, t_, *tail)
-                mask = torch.cat((left, mask, right), dim=2)
+            # F.pad maps to a padding kernel BIREN rejects ('Unsupported BR type for
+            # ScalarType: 0'); cat of zeros is the same and always works. Padding is
+            # unconditional so no band can skip the alignment.
+            b_, c_, _, t_ = mask.shape[:4]
+            tail = mask.shape[4:]
+            left = mask.new_zeros(b_, c_, fstart, t_, *tail)
+            right = mask.new_zeros(b_, c_, self.n_freq - fend, t_, *tail)
+            mask = torch.cat((left, mask, right), dim=2)
+            if total is not None and mask.shape != total.shape:
+                if mask.dim() == total.dim() - 1:
+                    mask = mask.unsqueeze(-1)
+                elif mask.dim() == total.dim() + 1:
+                    total = total.unsqueeze(-1)
             total = mask if total is None else total + mask
         if total is not None:
             masks = torch.view_as_complex(total.contiguous()) if total_is_complex else total
