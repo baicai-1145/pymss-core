@@ -92,7 +92,7 @@ class OverlappingMaskEstimationModule(MaskEstimationModuleBase):
         # frequency axis and summed in real/imaginary space; the bands may overlap,
         # which makes padding-and-adding the exact equivalent of the slice add.
         total = None
-        total_is_complex = False
+        total_is_complex = None
         for im in range(n_bands):
             fstart, fend = self.band_specs[im]
             mask = mask_list[im] if mask_list is not None else self.compute_mask(q, im)
@@ -100,9 +100,12 @@ class OverlappingMaskEstimationModule(MaskEstimationModuleBase):
             if mask.shape[2] != fend - fstart or fend > self.n_freq:
                 total = None
                 break
-            if mask.is_complex():
-                total_is_complex = True
-                mask = torch.view_as_real(mask.contiguous())
+            if total_is_complex is None:
+                total_is_complex = bool(mask.is_complex())
+            if total_is_complex:
+                # Accumulate in real/imaginary space: complex zeros cannot be
+                # allocated on BIREN. Real masks join with a trailing singleton.
+                mask = torch.view_as_real(mask.contiguous()) if mask.is_complex() else mask.unsqueeze(-1)
             if fstart or fend < self.n_freq:
                 # F.pad maps to a padding kernel BIREN rejects ('Unsupported BR type
                 # for ScalarType: 0'); cat of zeros is the same and always works.
