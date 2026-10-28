@@ -166,6 +166,34 @@ def istft_npu(
     return out / norm.clamp_min(_TINY)
 
 
+def masked_spectrum(mask: torch.Tensor, spec: torch.Tensor) -> torch.Tensor:
+    """Multiply a real mask into a complex spectrum.
+
+    BIREN has no pointwise kernel for ``complex64 * float32``: it tries to cast
+    the mask to complex64 on the device and fails with
+
+        Typecast for BUFFER layout, src_dtype_FP32 and dst_dtype_COMPLEX64 is not implemented
+        pointwise No SUPA Function found ... input_dtype = COMPLEX64
+
+    so the product is formed on the real/imaginary planes with plain float
+    kernels, which every backend supports.  Non-complex inputs take the direct
+    path.
+
+    Args:
+        mask: Real mask, broadcastable against the spectrum's leading dims.
+        spec: Real or complex spectrum.
+
+    Returns:
+        ``mask * spec`` with the spectrum's dtype.
+    """
+    if not spec.is_complex():
+        return mask * spec
+    planes = torch.view_as_real(spec)  # (..., 2)
+    while mask.dim() < planes.dim():
+        mask = mask.unsqueeze(-1)
+    return torch.view_as_complex((mask * planes).contiguous())
+
+
 def torch_stft_blocked(device) -> bool:
     """Return True when ``torch.stft``/``torch.istft`` must be replaced on this device.
 

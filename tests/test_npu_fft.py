@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from pymss_core.npu_fft import hann_window_npu, istft_npu, stft_npu
+from pymss_core.npu_fft import hann_window_npu, istft_npu, masked_spectrum, stft_npu
 
 
 @pytest.mark.parametrize("n_fft,hop,length", [(16, 4, 97), (16, 7, 97), (15, 4, 98), (512, 128, 1027), (1024, 320, 2051)])
@@ -70,3 +70,30 @@ def test_demucs_npu_hann_is_created_on_cpu(monkeypatch):
         assert demucs_local._hann(16, ref) is result
         assert demucs_local._hann(16, ref) is result
     assert created == ["cpu"]
+
+
+class TestMaskedSpectrum:
+    """BIREN has no complex64 * float32 pointwise kernel."""
+
+    def test_complex_input_matches_reference_product(self):
+        torch.manual_seed(0)
+        mask = torch.rand(2, 5, 7)
+        spec = torch.randn(2, 5, 7, dtype=torch.complex64)
+        got = masked_spectrum(mask, spec)
+        assert got.dtype == torch.complex64
+        assert torch.equal(got, mask.to(torch.complex64) * spec)
+
+    def test_extra_plane_dimension_is_created_for_broadcast(self):
+        mask = torch.rand(2, 5, 7)
+        spec = torch.randn(2, 5, 7, dtype=torch.complex64)
+        assert masked_spectrum(mask, spec).shape == (2, 5, 7)
+
+    def test_real_input_takes_the_direct_path(self):
+        mask = torch.rand(2, 5, 7)
+        spec = torch.randn(2, 5, 7)
+        assert torch.equal(masked_spectrum(mask, spec), mask * spec)
+
+    def test_batched_mask_broadcasts_over_channels(self):
+        mask = torch.rand(1, 5, 7)
+        spec = torch.randn(3, 5, 7, dtype=torch.complex64)
+        assert masked_spectrum(mask, spec).shape == (3, 5, 7)
