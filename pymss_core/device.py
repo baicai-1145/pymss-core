@@ -174,6 +174,13 @@ _PROFILES: dict[str, DeviceProfile] = {
     # * float16 is unusable: br10x matmul takes bf16/fp32/s8/u8 only and
     #   ``torch.autocast("supa", dtype=torch.float16)`` raises "Current SUPA
     #   Device does not support float16. Please switch dtype to bfloat16."
+    # Dilations: only the SUDNN plan path aborts.  With the eager conv kernels
+    # that pymss selects for BIREN (BRTB_ENABLE_FORCE_EAGER_CONV2D, see
+    # _VENDOR_ENV_DEFAULTS) every asymmetric combination measured passes:
+    #   pad=(0,1) dil=(1,2) max_err 5.8e-05 | pad=(1,0) dil=(1,2) 6.4e-05
+    #   pad=(2,1) dil=(1,3) 6.3e-05       | pad=(1,2) dil=(2,1) 5.9e-05
+    # so this profile keeps the limited list as a safety net for users who turn
+    # the eager path off, and dilated_conv_blocked() short-circuits when it is on.
     BIREN: DeviceProfile(
         BIREN, "supa", plugin="torch_br", complex_fft=False, rnn=False,
         amp_dtype=torch.bfloat16, dilated_conv=False,
@@ -497,6 +504,15 @@ def _normalise_dilation(dilation) -> tuple[int, int]:
     return (values[0], values[1])
 
 
+def eager_conv_enabled() -> bool:
+    """Return ``True`` when BIREN convs run on the vendor eager kernels.
+
+    Those kernels accept every dilation and skip the per-shape SUDNN plan
+    search; :data:`_VENDOR_ENV_DEFAULTS` enables them automatically.
+    """
+    return os.environ.get("BRTB_ENABLE_FORCE_EAGER_CONV2D", "") not in ("", "0", "false", "False")
+
+
 def dilated_conv_blocked(device, dilation) -> bool:
     """Return ``True`` when a conv with ``dilation`` must bounce through CPU.
 
@@ -504,6 +520,8 @@ def dilated_conv_blocked(device, dilation) -> bool:
     profile only keeps the dilations it lists (symmetric, ``h == w``).
     """
     profile = device_profile(device)
+    if profile.vendor == BIREN and eager_conv_enabled():
+        return False  # eager conv kernels handle every dilation (measured)
     if profile.dilated_conv:
         return False
     h, w = _normalise_dilation(dilation)
@@ -543,6 +561,7 @@ __all__ = (
     "autocast_dtype",
     "dilated_conv_blocked",
     "dilated_conv_supported",
+    "eager_conv_enabled",
     "clear_device_cache",
     "detect_vendor",
     "device_profile",

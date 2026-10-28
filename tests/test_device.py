@@ -19,7 +19,9 @@ from pymss_core.device import (
     NVIDIA,
     ROCM,
     amp_supported,
+    eager_conv_enabled,
     apply_vendor_env,
+    dilated_conv_blocked,
     autocast_dtype,
     clear_device_cache,
     rnn_op_blocked,
@@ -276,3 +278,25 @@ def test_current_vendor_device_is_set_for_privateuse1_backends(monkeypatch):
 
 def test_current_vendor_device_is_optional():
     assert set_current_vendor_device("cpu") is None
+
+
+def test_dilated_convs_run_on_biren_when_eager_kernels_are_active(monkeypatch):
+    """With eager conv kernels every asymmetric dilation measured passes."""
+    monkeypatch.setenv("BRTB_ENABLE_FORCE_EAGER_CONV2D", "1")
+    for dilation in ((1, 2), (2, 1), (1, 3), (3, 1), (4, 4)):
+        assert dilated_conv_blocked("supa", dilation) is False
+
+
+def test_dilated_convs_still_bounce_without_the_eager_kernels(monkeypatch):
+    """The SUDNN plan path aborts the process; keep the safety net."""
+    monkeypatch.delenv("BRTB_ENABLE_FORCE_EAGER_CONV2D", raising=False)
+    assert dilated_conv_blocked("supa", (1, 2)) is True
+    assert dilated_conv_blocked("supa", (2, 2)) is False
+    assert dilated_conv_blocked("supa", (4, 4)) is True
+
+
+def test_eager_conv_enabled_parses_falsey_values(monkeypatch):
+    monkeypatch.setenv("BRTB_ENABLE_FORCE_EAGER_CONV2D", "0")
+    assert eager_conv_enabled() is False
+    monkeypatch.setenv("BRTB_ENABLE_FORCE_EAGER_CONV2D", "1")
+    assert eager_conv_enabled() is True

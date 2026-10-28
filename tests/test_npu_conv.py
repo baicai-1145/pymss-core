@@ -114,6 +114,8 @@ def test_blocked_predicate_keeps_the_dilations_the_kernel_supports(monkeypatch):
     from pymss_core.device import BIREN, dilated_conv_blocked
 
     monkeypatch.setitem(device_mod._PROFILES, BIREN, device_mod._PROFILES[BIREN])
+    # This asserts the SUDNN safety net, i.e. the eager kernels are off.
+    monkeypatch.delenv("BRTB_ENABLE_FORCE_EAGER_CONV2D", raising=False)
     device_mod.clear_device_cache()
     # (1,1) and (2,2) are native on BIREN; asymmetric and (4,4) are not.
     assert dilated_conv_blocked("supa", (1, 1)) is False

@@ -17,6 +17,23 @@ BRTB_ENABLE_SUPA_FALLBACK=1        no effect on conv
 bfloat16             no effect
 ===================  =========
 
+With ``BRTB_ENABLE_FORCE_EAGER_CONV2D=1`` (what pymss sets for BIREN, see
+``device._VENDOR_ENV_DEFAULTS``) the convolution never reaches the SUDNN plan
+builder and every combination above works on the device:
+
+===================================  =========  ========
+padding / dilation                   shape      max err
+===================================  =========  ========
+(0,1) (1,2)                          (1,8,62,62)  5.8e-05
+(1,0) (1,2)                          (1,8,64,60)  6.4e-05
+(2,1) (1,3)                          (1,8,66,60)  6.3e-05
+(1,2) (2,1)                          (1,8,62,66)  5.9e-05
+(2,2) (2,2) symmetric                (1,8,64,64)  5.5e-05
+===================================  =========  ========
+
+``dilated_conv_blocked()`` therefore returns ``False`` whenever the eager
+kernels are active, and this fallback only guards the SUDNN path.
+
 Dilated layers are small in the models that use them, so bouncing those calls
 through CPU keeps inference usable.  Inference only: a call with autograd
 enabled raises instead of silently detaching.
