@@ -6,6 +6,7 @@ import torch
 import torch.nn.functional as F
 
 import pymss_core.npu_conv as npu_conv
+from pymss_core.npu_conv import replicate_pad_bins
 
 
 def test_undilated_conv_never_falls_back():
@@ -123,3 +124,26 @@ def test_blocked_predicate_keeps_the_dilations_the_kernel_supports(monkeypatch):
     # Vendors without the limitation never bounce.
     assert dilated_conv_blocked("cuda", (4, 2)) is False
     device_mod.clear_device_cache()
+
+
+class TestReplicatePadBins:
+    """F.pad(mode="replicate") maps to replication_pad2d, which SUPA fails on."""
+
+    def test_matches_torch_replicate_pad(self):
+        torch.manual_seed(0)
+        x = torch.randn(2, 3, 5, 7)
+        got = replicate_pad_bins(x, 9)
+        want = F.pad(x, (0, 0, 0, 4), mode="replicate")
+        assert got.shape == want.shape
+        assert torch.equal(got, want)
+
+    def test_no_padding_returns_input_unchanged(self):
+        x = torch.randn(1, 2, 5, 3)
+        assert replicate_pad_bins(x, 5) is x
+        assert replicate_pad_bins(x, 4) is x
+
+    def test_pads_the_requested_dimension(self):
+        x = torch.arange(2 * 3 * 4).reshape(1, 2, 3, 4).float()
+        got = replicate_pad_bins(x, 5, dim=3)
+        assert got.shape == (1, 2, 3, 5)
+        assert torch.equal(got[..., -1], x[..., -1])

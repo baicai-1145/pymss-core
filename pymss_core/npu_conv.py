@@ -48,6 +48,38 @@ def needs_cpu_fallback(conv, input) -> bool:
     return dilated_conv_blocked(input.device, dilation)
 
 
+def replicate_pad_bins(x: torch.Tensor, target_bins: int, dim: int = 2) -> torch.Tensor:
+    """Replicate-pad along the bin dimension without ``F.pad``.
+
+    ``F.pad(..., mode="replicate")`` maps to ``aten::replication_pad2d``, which
+    the SUPA backend reports as "not currently supported ... will fall back to
+    run on the CPU" and then fails outright inside SUDNN:
+
+        [reorder] ReorderWei2Plain() FAILED
+        Kernel execution failed with suError: 101
+
+    Repeating the last row is the definition of replicate padding for a
+    trailing-only pad, and every backend supports ``cat``/``expand``.
+
+    Args:
+        x: Tensor shaped ``(batch, channels, bins, frames)`` (or ``dim`` bins).
+        target_bins: Desired size of the padded dimension.
+        dim: Dimension to pad.
+
+    Returns:
+        ``x`` padded on the trailing side of ``dim`` to ``target_bins``.
+    """
+    pad = target_bins - x.shape[dim]
+    if pad <= 0:
+        return x
+    index = [slice(None)] * x.dim()
+    index[dim] = slice(-1, None)
+    edge = x[tuple(index)]
+    shape = list(x.shape)
+    shape[dim] = pad
+    return torch.cat([x, edge.expand(*shape)], dim=dim)
+
+
 def _conv_on_cpu(conv, input):
     """Evaluate ``conv`` on CPU in fp32 and move the result back."""
     if torch.is_grad_enabled():
