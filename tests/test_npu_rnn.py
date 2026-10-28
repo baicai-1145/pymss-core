@@ -6,6 +6,7 @@ from torch import nn
 from torch.nn.utils.rnn import pack_padded_sequence, PackedSequence
 
 import pymss_core.npu_rnn as npu_rnn
+from _devices import DEVICES
 
 
 @pytest.fixture
@@ -19,7 +20,7 @@ def patched_runtime(monkeypatch):
 @pytest.mark.parametrize("kind", [nn.LSTM, nn.GRU, nn.RNN])
 @pytest.mark.parametrize("subclass", [False, True])
 @pytest.mark.parametrize("packed", [False, True])
-@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("device", DEVICES)
 def test_install_preserves_native_forward_and_gradients(patched_runtime, kind, subclass, packed, device):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
