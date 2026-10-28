@@ -46,7 +46,7 @@ def hann_window_npu(window_length: int, *, device, dtype=torch.float32, periodic
 #: proven both correct and fast; 4096 made scnet spend 600 s inside one call
 #: (the vendor plans/autotunes a transform the first time it sees a shape), and
 #: every smaller size has been caught returning silent zeros.
-_VENDOR_FFT_ALLOWED = frozenset({2048})
+_VENDOR_FFT_ALLOWED = frozenset()
 
 _DFT_CACHE: dict[tuple[int, str, torch.dtype], tuple[torch.Tensor, torch.Tensor]] = {}
 
@@ -93,6 +93,10 @@ def vendor_fft_trusted(n: int, device=None) -> bool:
     Returns:
         ``True`` when the vendor kernel is trusted for this size.
     """
+    # Measured on BIREN (n_fft=2048, 862 frames, 10 s of audio at 44.1 kHz):
+    # vendor torch.fft.rfft 494 ms, radix-2 495 ms, DFT matrix 41 ms.  The matrix is
+    # one large GEMM and this card is only fast on large GEMMs, so it wins by an
+    # order of magnitude and the vendor kernel is no longer used by default.
     allowed = os.environ.get("PYMSS_VENDOR_FFT_SIZES", "")
     sizes = {int(part) for part in allowed.split(",") if part.strip()} if allowed else _VENDOR_FFT_ALLOWED
     if n not in sizes or (n & (n - 1)) != 0:
@@ -148,8 +152,17 @@ def _dft_matrices(n: int, device, dtype) -> tuple[torch.Tensor, torch.Tensor]:
     return cached
 
 
+#: Once a matmul-based transform has failed on this device, stop retrying it.
+_MATMUL_FFT_BROKEN = set()
+
+
 def _rfft_matmul(x: torch.Tensor, n: int) -> torch.Tensor:
-    """``rfft`` exactly: radix-2 for powers of two, DFT matrix otherwise."""
+    """``rfft`` exactly, by DFT matrix; radix-2 when the matrix route fails."""
+    if n <= 8192 and instance_key(x) not in _MATMUL_FFT_BROKEN:
+        try:
+            return _rfft_matmul_dft(x, n)
+        except Exception:  # vendor JIT/plan failures are not our bug; remember and move on
+            _MATMUL_FFT_BROKEN.add(instance_key(x))
     if (n & (n - 1)) == 0:
         lead = x.shape[:-1]
         flat = x.reshape(-1, n)
@@ -160,7 +173,12 @@ def _rfft_matmul(x: torch.Tensor, n: int) -> torch.Tensor:
 
 
 def _irfft_matmul(spec: torch.Tensor, n: int) -> torch.Tensor:
-    """``irfft`` exactly: radix-2 for powers of two, DFT matrix otherwise."""
+    """``irfft`` exactly, by DFT matrix; radix-2 when the matrix route fails."""
+    if n <= 8192 and instance_key(spec) not in _MATMUL_FFT_BROKEN:
+        try:
+            return _irfft_matmul_dft(spec, n)
+        except Exception:
+            _MATMUL_FFT_BROKEN.add(instance_key(spec))
     if (n & (n - 1)) == 0:
         planes = torch.view_as_real(spec.reshape(-1, spec.shape[-1]).contiguous())
         half = n // 2
@@ -199,6 +217,11 @@ def _irfft_matmul_dft(spec: torch.Tensor, n: int) -> torch.Tensor:
     weighted_imag = planes[..., 1] * weight
     out = (weighted_real @ cos - weighted_imag @ sin) / n
     return out.reshape(*lead, n)
+
+
+def instance_key(tensor: torch.Tensor) -> str:
+    """Key for the "matmul transforms are broken here" memo, per device and dtype."""
+    return f"{tensor.device.type}:{tensor.device.index}:{tensor.dtype}"
 
 
 _TWIDDLE_CACHE: dict[tuple[int, str, torch.dtype, bool], tuple[torch.Tensor, torch.Tensor]] = {}

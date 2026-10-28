@@ -168,10 +168,11 @@ class TestExactDftFallback:
         assert back.shape == x.shape
         assert torch.allclose(back, x, atol=2e-3)
 
-    def test_only_the_proven_size_uses_the_vendor_kernel(self):
-        assert vendor_fft_trusted(2048) is True
-        # 4096 stalled scnet for 600 s inside one call; 1411 has no plan;
-        # 1024/16 answered silent zeros.
+    def test_the_vendor_kernel_is_off_by_default(self):
+        # Measured at n=2048 with 862 frames: vendor 494 ms, radix-2 495 ms, DFT
+        # matrix 41 ms.  The matrix is a large GEMM, which is what this card is
+        # fast at, so no size is trusted by default.
+        assert vendor_fft_trusted(2048) is False
         assert vendor_fft_trusted(4096) is False
         assert vendor_fft_trusted(1411) is False
         assert vendor_fft_trusted(1024) is False
