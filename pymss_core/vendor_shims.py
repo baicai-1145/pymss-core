@@ -15,6 +15,8 @@ window is built on the host (a few hundred floats).
 """
 from __future__ import annotations
 
+import os
+
 import torch
 
 #: Names of the shims installed for the current device, for logging/debugging.
@@ -591,17 +593,37 @@ def sdpa_equivalent(
     """
     if scale is None:
         scale = query.shape[-1] ** -0.5
-    scores = torch.matmul(query, key.transpose(-1, -2)) * scale
+    # The model hands over tensors produced by the rotary complex multiply, whose
+    # strides make SUDNN fail to compile the GE kernel ("Got GE error", "build graph
+    # failed").  The identical bmm succeeds from a plain layout, so normalise first.
+    if not query.is_contiguous():
+        query = query.contiguous()
+    if not key.is_contiguous():
+        key = key.contiguous()
+    if not value.is_contiguous():
+        value = value.contiguous()
+    # BIREN's SUDNN tries to JIT-compile a kernel for 4-D batched matmuls and its
+    # compiler is broken in this image ("Failed to init python", "Failed to build
+    # the assembly code"), which shows up as
+    # "SudnnPlanBuilder.h:667 Failed to finalize engine config descriptor".  A plain
+    # contiguous 3-D bmm hits the prebuilt kernels, so the leading dimensions are
+    # folded together and the math stays identical.
+    lead = query.shape[:-2]
+    length, dim = query.shape[-2], query.shape[-1]
+    flat_q = query.reshape(-1, length, dim).contiguous()
+    flat_k = key.reshape(-1, length, dim).contiguous()
+    flat_v = value.reshape(-1, length, dim).contiguous()
+    scores = torch.bmm(flat_q, flat_k.transpose(-1, -2)) * scale
     if attn_mask is not None:
-        scores = scores + attn_mask
+        scores = scores + attn_mask.reshape(scores.shape[-2:])
     elif is_causal:
-        length_q, length_k = query.shape[-2], key.shape[-2]
-        mask = torch.ones(length_q, length_k, dtype=torch.bool, device=query.device).tril()
+        mask = torch.ones(length, length, dtype=torch.bool, device=query.device).tril()
         scores = scores.masked_fill(~mask, float("-inf"))
     probs = torch.softmax(scores, dim=-1)
     if dropout_p > 0.0:
         probs = torch.nn.functional.dropout(probs, dropout_p)
-    return torch.matmul(probs, value)
+    out = torch.bmm(probs, flat_v)
+    return out.reshape(*lead, length, dim)
 
 
 def install_sdpa_shim() -> bool:
