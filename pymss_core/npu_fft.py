@@ -149,6 +149,30 @@ def _dft_matrices(n: int, device, dtype) -> tuple[torch.Tensor, torch.Tensor]:
 
 
 def _rfft_matmul(x: torch.Tensor, n: int) -> torch.Tensor:
+    """``rfft`` exactly: radix-2 for powers of two, DFT matrix otherwise."""
+    if (n & (n - 1)) == 0:
+        lead = x.shape[:-1]
+        flat = x.reshape(-1, n)
+        planes = torch.stack((flat, torch.zeros_like(flat)), dim=-1).reshape(*lead, n, 2)
+        spectrum = _fft_exact_planes(planes)
+        return torch.view_as_complex(spectrum[..., : n // 2 + 1, :].contiguous())
+    return _rfft_matmul_dft(x, n)
+
+
+def _irfft_matmul(spec: torch.Tensor, n: int) -> torch.Tensor:
+    """``irfft`` exactly: radix-2 for powers of two, DFT matrix otherwise."""
+    if (n & (n - 1)) == 0:
+        planes = torch.view_as_real(spec.reshape(-1, spec.shape[-1]).contiguous())
+        half = n // 2
+        mirror = planes[..., 1:half, :].flip(-2)
+        mirror = torch.stack((mirror[..., 0], -mirror[..., 1]), dim=-1)
+        full = torch.cat((planes, mirror), dim=-2)
+        wave = _fft_exact_planes(full, inverse=True)[..., 0]
+        return wave.reshape(*spec.shape[:-1], n)
+    return _irfft_matmul_dft(spec, n)
+
+
+def _rfft_matmul_dft(x: torch.Tensor, n: int) -> torch.Tensor:
     """``rfft`` by DFT matrix multiply (real kernels only)."""
     cos, sin = _dft_matrices(n, x.device, x.dtype)
     lead = x.shape[:-1]
@@ -160,7 +184,7 @@ def _rfft_matmul(x: torch.Tensor, n: int) -> torch.Tensor:
     return torch.view_as_complex(planes)
 
 
-def _irfft_matmul(spec: torch.Tensor, n: int) -> torch.Tensor:
+def _irfft_matmul_dft(spec: torch.Tensor, n: int) -> torch.Tensor:
     """``irfft`` by DFT matrix multiply (real kernels only)."""
     real_dtype = spec.real.dtype
     cos, sin = _dft_matrices(n, spec.device, real_dtype)
@@ -175,6 +199,97 @@ def _irfft_matmul(spec: torch.Tensor, n: int) -> torch.Tensor:
     weighted_imag = planes[..., 1] * weight
     out = (weighted_real @ cos - weighted_imag @ sin) / n
     return out.reshape(*lead, n)
+
+
+_TWIDDLE_CACHE: dict[tuple[int, str, torch.dtype, bool], tuple[torch.Tensor, torch.Tensor]] = {}
+
+
+def _twiddles(n: int, device, dtype, inverse: bool) -> tuple[torch.Tensor, torch.Tensor]:
+    """Cached cos/sin table of the ``n // 2`` distinct roots of unity."""
+    key = (n, str(device), dtype, inverse)
+    cached = _TWIDDLE_CACHE.get(key)
+    if cached is not None:
+        return cached
+    # Forward uses exp(-2*pi*i*k/n), the inverse uses the conjugate.
+    angle = (2.0 * math.pi / n) * torch.arange(n // 2, dtype=torch.float64)
+    if not inverse:
+        angle = -angle
+    cos = angle.cos().to(dtype)
+    sin = angle.sin().to(dtype)
+    if str(device) != "cpu":
+        cos = cos.to(device)
+        sin = sin.to(device)
+    _TWIDDLE_CACHE[key] = (cos, sin)
+    return cos, sin
+
+
+def _fft_radix2(planes: torch.Tensor, inverse: bool = False) -> torch.Tensor:
+    """Iterative radix-2 FFT on the last-but-one axis of a real/imag plane tensor.
+
+    The DFT matrix fallback is exact but its matmul is large: for a 4096-point
+    transform it is a (frames, 4096) x (4096, 2049) product that costs 2.3 s on
+    BIREN -- 31% of scnet's run -- and occasionally fails inside SUDNN with
+    ``ErrorCode: 11``.  A radix-2 decomposition needs only element-wise real ops
+    and no workspace at all.
+
+    Args:
+        planes: ``(..., n, 2)`` real/imaginary pairs, ``n`` a power of two.
+        inverse: Whether to run the inverse transform.
+
+    Returns:
+        The transformed planes.
+    """
+    n = planes.shape[-2]
+    if n == 1:
+        return planes
+    cos, sin = _twiddles(n, planes.device, planes.dtype, inverse)
+
+    # bit-reversal permutation
+    bits = n.bit_length() - 1
+    index = torch.arange(n, device=planes.device)
+    reversed_index = torch.zeros_like(index)
+    for bit in range(bits):
+        reversed_index = (reversed_index << 1) | ((index >> bit) & 1)
+    out = planes.index_select(planes.dim() - 2, reversed_index)
+
+    length = 2
+    while length <= n:
+        half = length // 2
+        stride = n // length
+        lead = out.shape[:-2]
+        stage = out.reshape(*lead, n // length, length, 2)
+        wr = cos[::stride][:half]
+        wi = sin[::stride][:half]
+        a = stage[..., :half, :]
+        b = stage[..., half:, :]
+        br = b[..., 0]
+        bi = b[..., 1]
+        tr = br * wr - bi * wi
+        ti = br * wi + bi * wr
+        out = torch.cat((torch.stack((a[..., 0] + tr, a[..., 1] + ti), dim=-1),
+                         torch.stack((a[..., 0] - tr, a[..., 1] - ti), dim=-1)), dim=-2)
+        out = out.reshape(*lead, n, 2)
+        length *= 2
+    if inverse:
+        out = out / n
+    return out
+
+
+def _fft_exact_planes(planes: torch.Tensor, inverse: bool = False) -> torch.Tensor:
+    """Radix-2 when the length is a power of two, otherwise the DFT matrix."""
+    n = planes.shape[-2]
+    if (n & (n - 1)) == 0:
+        return _fft_radix2(planes, inverse)
+    real = _dft_matrices(n, planes.device, planes.dtype)[0 if not inverse else 0]
+    cos, sin = _dft_matrices(n, planes.device, planes.dtype)
+    flat = planes.reshape(-1, n)
+    xr, xi = flat[..., 0], flat[..., 1]
+    real = xr @ cos.transpose(0, 1) - xi @ sin.transpose(0, 1)
+    imag = xr @ sin.transpose(0, 1) + xi @ cos.transpose(0, 1)
+    if inverse:
+        real, imag = real / n, imag / n
+    lead = planes.shape[:-2]
+    return torch.stack((real, imag), dim=-1).reshape(*lead, n, 2)
 
 
 def _pad_to_length(x: torch.Tensor, n: int, dim: int) -> torch.Tensor:

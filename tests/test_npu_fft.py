@@ -235,3 +235,29 @@ class TestExactFftAnyDim:
         assert install_fft_shim() is True
         assert install_fft_shim() is False
         reset_shims()
+
+
+class TestRadix2Fft:
+    """The DFT matrix costs 2.3 s per 4096-point transform and can fail in SUDNN."""
+
+    @pytest.mark.parametrize("n", [16, 256, 1024, 2048, 4096])
+    def test_rfft_matches_torch(self, n):
+        x = torch.randn(2, 5, n)
+        assert torch.allclose(_rfft_matmul(x, n), torch.fft.rfft(x, dim=-1), atol=1e-3)
+
+    @pytest.mark.parametrize("n", [16, 256, 1024, 2048, 4096])
+    def test_irfft_round_trips(self, n):
+        x = torch.randn(2, 5, n)
+        spec = torch.fft.rfft(x, dim=-1)
+        assert torch.allclose(_irfft_matmul(spec, n), x, atol=1e-4)
+
+    @pytest.mark.parametrize("n", [1000, 1411])
+    def test_non_power_of_two_still_uses_the_matrix(self, n):
+        x = torch.randn(2, 3, n)
+        assert torch.allclose(_rfft_matmul(x, n), torch.fft.rfft(x, dim=-1), atol=2e-3)
+
+    def test_radix2_matches_the_matrix_path(self):
+        from pymss_core.npu_fft import _rfft_matmul_dft
+
+        x = torch.randn(2, 3, 256)
+        assert torch.allclose(_rfft_matmul(x, 256), _rfft_matmul_dft(x, 256), atol=1e-6)
