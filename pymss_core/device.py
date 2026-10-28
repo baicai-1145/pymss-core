@@ -189,6 +189,9 @@ _VENDOR_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (ASCEND, ("ascend", "npu")),
 )
 
+#: Devices that always keep their own profile, even under a forced vendor.
+_HOST_DEVICE_TYPES = ("cpu", "mps")
+
 #: Private device types that imply a vendor without any probing.
 _DEVICE_TYPE_VENDOR: dict[str, str] = {
     "npu": ASCEND,
@@ -238,7 +241,10 @@ def _cuda_device_name() -> str:
 def detect_vendor(device_type: str) -> str:
     """Best-effort vendor detection for a torch device type.
 
-    ``PYMSS_DEVICE_BACKEND`` wins over every probe.
+    ``PYMSS_DEVICE_BACKEND`` wins over every probe for accelerators.  Host
+    devices (``cpu``) keep their own profile so a forced accelerator vendor never
+    reclassifies host tensors -- otherwise every CPU tensor would inherit the
+    vendor's fallbacks.
 
     Args:
         device_type: ``torch.device(...).type`` of the target device.
@@ -248,7 +254,7 @@ def detect_vendor(device_type: str) -> str:
         for anything unknown.
     """
     forced = os.environ.get("PYMSS_DEVICE_BACKEND", "").strip().lower()
-    if forced in _PROFILES:
+    if forced in _PROFILES and device_type not in _HOST_DEVICE_TYPES:
         return forced
 
     if device_type in _DEVICE_TYPE_VENDOR:

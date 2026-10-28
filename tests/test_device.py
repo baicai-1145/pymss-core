@@ -201,3 +201,14 @@ def test_autocast_dtype_follows_the_profile():
     assert autocast_dtype("supa") is torch.bfloat16
     # amp=False devices fall back to plain float32.
     assert autocast_dtype("cpu") is torch.float32
+
+
+def test_forced_vendor_does_not_reclassify_host_devices(monkeypatch):
+    """PYMSS_DEVICE_BACKEND picks the accelerator, not CPU tensors."""
+    monkeypatch.setenv("PYMSS_DEVICE_BACKEND", "biren")
+    clear_device_cache()
+    assert detect_vendor("supa") == BIREN
+    assert detect_vendor("cpu") == CPU
+    assert device_profile("cpu").rnn is True
+    assert device_profile("cpu").needs_rnn_fallback is False
+    clear_device_cache()
