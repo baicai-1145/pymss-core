@@ -45,6 +45,42 @@ def rescale_module(module, reference):
             sub.weight.data /= scale
             if sub.bias is not None: sub.bias.data /= scale
 def _freq_dconv(dconv, y): b, c, fr, t = y.shape; return dconv(y.permute(0, 2, 1, 3).reshape(-1, c, t)).view(b, fr, c, t).transpose(1, 2)
+def _raw_lstm_cpu(seq, weights, bias, num_layers, bidirectional):
+    """Reference LSTM loop; torch_br hooks aten::lstm even for CPU tensors."""
+    layer_input = seq
+    idx = 0
+    for _layer in range(num_layers):
+        outputs = []
+        for direction in (0, 1) if bidirectional else (0,):
+            w_ih, w_hh = weights[idx].t().contiguous(), weights[idx + 1].t().contiguous()
+            b_ih = b_hh = None
+            if bias:
+                b_ih, b_hh = weights[idx + 2], weights[idx + 3]
+            idx += 4 if bias else 2
+            x = layer_input.flip(0) if direction else layer_input
+            hidden = w_ih.shape[1] // 4
+            h = x.new_zeros(x.shape[1], hidden)
+            c = torch.zeros_like(h)
+            steps = []
+            for t in range(x.shape[0]):
+                gates = x[t] @ w_ih
+                hg = h @ w_hh
+                if b_ih is not None:
+                    gates = gates + b_ih
+                    hg = hg + b_hh
+                gates = gates + hg
+                i, f, g, o = gates.chunk(4, dim=-1)
+                c = f.sigmoid() * c + i.sigmoid() * g.tanh()
+                h = o.sigmoid() * c.tanh()
+                steps.append(h)
+            out = torch.stack(steps, dim=0)
+            if direction:
+                out = out.flip(0)
+            outputs.append(out)
+        layer_input = torch.cat(outputs, dim=-1) if bidirectional else outputs[0]
+    return layer_input
+
+
 class BLSTM(nn.Module):
     def __init__(self, dim, layers=1, max_steps=None, skip=False): super().__init__(); self.max_steps = max_steps; self.lstm = nn.LSTM(bidirectional=True, num_layers=layers, hidden_size=dim, input_size=dim); self.linear = nn.Linear(2 * dim, dim); self.skip = skip
     def forward(self, x):
@@ -62,21 +98,8 @@ class BLSTM(nn.Module):
 
         def run(batch):  # (N, C, T) -> (N, C, T) through raw LSTM + linear
             seq = batch.permute(2, 0, 1)
-            zeros_h = weights[0].new_zeros(lstm.num_layers * (2 if lstm.bidirectional else 1), seq.shape[1], lstm.hidden_size)
-            # torch_br hooks aten::lstm itself and routes CPU tensors to the
-            # SUPA IR builder; its documented escape hatch forces the CPU kernel
-            import os
-            previous = os.environ.get("BRTB_ENABLE_SUPA_FALLBACK")
-            os.environ["BRTB_ENABLE_SUPA_FALLBACK"] = "1"
-            try:
-                out = torch._VF.lstm(seq, (zeros_h, zeros_h.clone()), tuple(weights), lstm.bias,
-                                     lstm.num_layers, lstm.dropout, lstm.training,
-                                     lstm.bidirectional, False)[0]
-            finally:
-                if previous is None:
-                    os.environ.pop("BRTB_ENABLE_SUPA_FALLBACK", None)
-                else:
-                    os.environ["BRTB_ENABLE_SUPA_FALLBACK"] = previous
+            weights = [w.detach() for w in list(lstm._flat_weights)]
+            out = _raw_lstm_cpu(seq, weights, lstm.bias, lstm.num_layers, lstm.bidirectional)
             return self.linear(out).permute(1, 2, 0)
 
         y, framed = x, False
