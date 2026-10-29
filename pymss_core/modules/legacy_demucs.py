@@ -129,7 +129,10 @@ class LegacyLocalState(nn.Module):
         if x.device.type == "supa":
             # in-place masked_fill_/einsum combos hit "_copy_from_and_resize"
             # on the vendor stack; the legacy attention is tiny -- CPU roundtrip
+            # (self moves to CPU once; weights stay there for this path)
             device = x.device
+            if next(self.parameters()).device.type != "cpu":
+                self.cpu()
             return self._forward_reference(x.cpu()).to(device)
         return self._forward_reference(x)
     def _forward_reference(self, x):
