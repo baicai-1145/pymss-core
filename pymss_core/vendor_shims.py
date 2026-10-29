@@ -623,10 +623,15 @@ def sdpa_equivalent(
     if chunk and flat_q.shape[0] > chunk:
         # Inside a whole model the vendor refuses even batches that a standalone
         # bmm handles, so the batch can be walked in slices.
+        # Fold the scale into q: q is 110 MB for the shapes a production roformer uses,
+        # while the score tensor is 1.47 GB, so scaling after the bmm costs a full extra
+        # read and write of the scores (about 5 ms per attention here, 120 ms per run).
+        if scale != 1.0:
+            flat_q = flat_q * scale
         pieces = []
         for start in range(0, flat_q.shape[0], chunk):
             stop = min(start + chunk, flat_q.shape[0])
-            piece = torch.bmm(flat_q[start:stop], flat_k[start:stop].transpose(-1, -2)) * scale
+            piece = torch.bmm(flat_q[start:stop], flat_k[start:stop].transpose(-1, -2))
             pieces.append(piece)
         # A single block is the common case (496 folded rows against a 1024 block) and
         # cat would copy the whole score tensor -- 1.5 GB here -- for nothing.
@@ -643,7 +648,7 @@ def sdpa_equivalent(
             values.append(torch.bmm(probs[start:stop], flat_v[start:stop]))
         out = values[0] if len(values) == 1 else torch.cat(values, dim=0)
         return out.reshape(*lead, length, dim)
-    scores = torch.bmm(flat_q, flat_k.transpose(-1, -2)) * scale
+    scores = torch.bmm(flat_q * scale, flat_k.transpose(-1, -2))
     if attn_mask is not None:
         scores = scores + attn_mask.reshape(scores.shape[-2:])
     elif is_causal:
