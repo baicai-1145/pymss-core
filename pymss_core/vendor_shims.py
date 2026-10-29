@@ -703,7 +703,7 @@ def sdpa_equivalent(
     if attn_mask is not None:
         scores = scores + attn_mask.reshape(scores.shape[-2:])
     elif is_causal:
-        mask = torch.ones(length, length, dtype=torch.bool, device=query.device).tril()
+        mask = torch.ones(length, kv_length, dtype=torch.bool, device=query.device).tril()
         scores = scores.masked_fill(~mask, float("-inf"))
     probs = torch.softmax(scores, dim=-1)
     if dropout_p > 0.0:
