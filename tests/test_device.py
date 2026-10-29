@@ -338,9 +338,15 @@ def test_prepare_device_installs_the_rnn_fallback(monkeypatch):
 
 
 class TestRotaryPathChoice:
-    """The two rotary formulations must agree; only their speed differs."""
+    """The rotated layout is permuted; scores must still match the reference."""
 
-    def test_strided_and_complex_paths_match(self):
+    @staticmethod
+    def _reference(cos, sin, t):
+        rot = torch.complex(cos, sin)
+        rotated = torch.view_as_complex(t.reshape(*t.shape[:-1], -1, 2).contiguous()) * rot
+        return torch.view_as_real(rotated).reshape(t.shape)
+
+    def test_permuted_layout_matches_interleaved(self):
         import torch
 
         from pymss_core.modules.bs_roformer.transformer import apply_rotary_emb_fast
@@ -349,13 +355,26 @@ class TestRotaryPathChoice:
         t = torch.randn(2, 3, 4, 8)
         cos = torch.randn(1, 3, 1, 4)
         sin = torch.randn(1, 3, 1, 4)
-        got = apply_rotary_emb_fast(cos, sin, t)  # CPU takes the strided path
-        rot = torch.complex(cos, sin)
-        rotated = torch.view_as_complex(t.reshape(*t.shape[:-1], -1, 2)) * rot
-        want = torch.view_as_real(rotated).reshape_as(t)
-        assert torch.allclose(got, want, atol=1e-5)
+        got = apply_rotary_emb_fast(cos, sin, t)
+        want = self._reference(cos, sin, t)
+        permuted = torch.cat((want[..., ::2], want[..., 1::2]), dim=-1)
+        assert torch.allclose(got, permuted, atol=1e-5)
 
-    def test_strided_path_handles_non_contiguous_input(self):
+    def test_attention_scores_are_unchanged(self):
+        import torch
+
+        from pymss_core.modules.bs_roformer.transformer import apply_rotary_emb_fast
+
+        torch.manual_seed(0)
+        q = torch.randn(2, 3, 4, 8)
+        k = torch.randn(2, 3, 4, 8)
+        cos = torch.randn(1, 3, 1, 4)
+        sin = torch.randn(1, 3, 1, 4)
+        reference = self._reference(cos, sin, q) @ self._reference(cos, sin, k).transpose(-1, -2)
+        permuted = apply_rotary_emb_fast(cos, sin, q) @ apply_rotary_emb_fast(cos, sin, k).transpose(-1, -2)
+        assert torch.allclose(reference, permuted, atol=1e-5)
+
+    def test_handles_non_contiguous_input(self):
         import torch
 
         from pymss_core.modules.bs_roformer.transformer import apply_rotary_emb_fast
@@ -366,7 +385,6 @@ class TestRotaryPathChoice:
         cos = torch.randn(1, 3, 1, 4)
         sin = torch.randn(1, 3, 1, 4)
         got = apply_rotary_emb_fast(cos, sin, t)
-        rot = torch.complex(cos, sin)
-        rotated = torch.view_as_complex(t.reshape(*t.shape[:-1], -1, 2).contiguous()) * rot
-        want = torch.view_as_real(rotated).reshape(t.shape)
-        assert torch.allclose(got, want, atol=1e-5)
+        want = self._reference(cos, sin, t)
+        permuted = torch.cat((want[..., ::2], want[..., 1::2]), dim=-1)
+        assert torch.allclose(got, permuted, atol=1e-5)

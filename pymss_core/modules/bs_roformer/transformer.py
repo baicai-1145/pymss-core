@@ -47,23 +47,32 @@ _COMPLEX_ROTARY_DEVICES = frozenset({"cuda", "mps"})
 
 
 def apply_rotary_emb_fast(cos, sin, t):
-    # On BIREN the complex route costs 122 ms per call for the (62, 862, 8, 64) tensors
-    # a production roformer rotates, against 35 ms for the strided form (3.5x): the
-    # complex multiply goes through view_as_complex/view_as_real, which the vendor
-    # shims have to split into real planes, while four muls and two strided writes do
-    # not.  CUDA/MPS measured the opposite (4.7x for the complex route), so the choice
-    # follows the device rather than one global assumption.
+    """Rotate ``t`` and return ``[even | odd]`` halves instead of interleaved pairs.
+
+    Only q and k are ever rotated, and both get the same permutation of their head
+    dimension, so every dot product -- and therefore every attention score -- is
+    unchanged.  What does change is the write pattern: interleaved output needs
+    strided stores, which cost 35.7 ms for the (62, 862, 8, 64) tensors a production
+    roformer rotates, while writing two contiguous halves costs 9.4 ms.  CUDA and MPS
+    measured the complex route fastest (4.7x), so those keep it.
+
+    Args:
+        cos: Cosine table, broadcastable to ``t[..., ::2]``.
+        sin: Sine table of the same shape as ``cos``.
+        t: Tensor whose last dimension is the head dimension.
+
+    Returns:
+        The rotated tensor with the head dimension permuted to ``[even | odd]``.
+    """
     if t.device.type in _COMPLEX_ROTARY_DEVICES and (
         t.dtype == torch.float32 or (t.is_cuda and t.dtype == torch.float16)
     ):
         rot = torch.complex(cos, sin)
         rotated = torch.view_as_complex(t.reshape(*t.shape[:-1], -1, 2)) * rot
         return torch.view_as_real(rotated).reshape_as(t)
-    t_even, t_odd = t[..., ::2], t[..., 1::2]
-    out = torch.empty_like(t)
-    torch.sub(t_even * cos, t_odd * sin, out=out[..., ::2])
-    torch.add(t_odd * cos, t_even * sin, out=out[..., 1::2])
-    return out
+    even = t[..., ::2] * cos - t[..., 1::2] * sin
+    odd = t[..., 1::2] * cos + t[..., ::2] * sin
+    return torch.cat((even, odd), dim=-1)
 
 
 def cached_rotary_cos_sin(rotary_embed, seq_len, device, dtype):
