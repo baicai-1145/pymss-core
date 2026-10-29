@@ -1153,10 +1153,9 @@ def install_embedding_shim() -> bool:
     def embedding(input, weight, *args, **kwargs):
         device = getattr(weight, "device", None)
         if device is not None and device.type == "supa":
-            try:
-                return weight.index_select(0, input.reshape(-1)).reshape(*input.shape, weight.shape[-1])
-            except RuntimeError:
-                return original(input.cpu(), weight.cpu(), *args, **kwargs).to(device)
+            # index_select can hard-abort the process (SUPA Pointwise launch
+            # error, SIGABRT, uncatchable); embeddings are tiny -- CPU is safe
+            return original(input.cpu(), weight.cpu(), *args, **kwargs).to(device)
         return original(input, weight, *args, **kwargs)
 
     embedding._vendor_shim = True

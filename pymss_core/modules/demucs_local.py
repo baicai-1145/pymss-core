@@ -84,19 +84,17 @@ def _raw_lstm_cpu(seq, weights, bias, num_layers, bidirectional):
 class BLSTM(nn.Module):
     def __init__(self, dim, layers=1, max_steps=None, skip=False): super().__init__(); self.max_steps = max_steps; self.lstm = nn.LSTM(bidirectional=True, num_layers=layers, hidden_size=dim, input_size=dim); self.linear = nn.Linear(2 * dim, dim); self.skip = skip
     def forward(self, x):
-        # The vendor LSTM + unfold framing produce a length drift on SUPA
-        # (skip-add broadcast 800 vs 860); run the whole cell on CPU there.
+        # The vendor fused-LSTM kernel drifts the time length on SUPA (skip-add
+        # broadcast 800 vs 860) and torch_br hooks aten::lstm/mm even for CPU
+        # tensors; the manual reference loop below runs on the input device with
+        # element ops + small matmuls that all work, and has no length drift.
         if x.device.type == "supa":
-            device = x.device
-            return self._forward_cpu(x.cpu()).to(device)
+            return self._forward_reference(x)
         return self._forward_torch(x)
-    def _forward_cpu(self, x):
-        # torch_br's nn.LSTM patch routes even CPU tensors to SUPA; bypass it
-        # with the raw functional kernel (mirrors _forward_torch exactly).
+    def _forward_reference(self, x):
         lstm = self.lstm
-        weights = list(lstm._flat_weights)
 
-        def run(batch):  # (N, C, T) -> (N, C, T) through raw LSTM + linear
+        def run(batch):  # (N, C, T) -> (N, C, T) through manual LSTM + linear
             seq = batch.permute(2, 0, 1)
             weights = [w.detach() for w in list(lstm._flat_weights)]
             out = _raw_lstm_cpu(seq, weights, lstm.bias, lstm.num_layers, lstm.bidirectional)
