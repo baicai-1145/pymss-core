@@ -628,7 +628,9 @@ def sdpa_equivalent(
             stop = min(start + chunk, flat_q.shape[0])
             piece = torch.bmm(flat_q[start:stop], flat_k[start:stop].transpose(-1, -2)) * scale
             pieces.append(piece)
-        scores = torch.cat(pieces, dim=0)
+        # A single block is the common case (496 folded rows against a 1024 block) and
+        # cat would copy the whole score tensor -- 1.5 GB here -- for nothing.
+        scores = pieces[0] if len(pieces) == 1 else torch.cat(pieces, dim=0)
         if attn_mask is not None:
             scores = scores + attn_mask.reshape(scores.shape[-2:])
         elif is_causal:
@@ -639,7 +641,8 @@ def sdpa_equivalent(
         for start in range(0, flat_v.shape[0], chunk):
             stop = min(start + chunk, flat_v.shape[0])
             values.append(torch.bmm(probs[start:stop], flat_v[start:stop]))
-        return torch.cat(values, dim=0).reshape(*lead, length, dim)
+        out = values[0] if len(values) == 1 else torch.cat(values, dim=0)
+        return out.reshape(*lead, length, dim)
     scores = torch.bmm(flat_q, flat_k.transpose(-1, -2)) * scale
     if attn_mask is not None:
         scores = scores + attn_mask.reshape(scores.shape[-2:])
