@@ -1200,6 +1200,38 @@ def install_matmul_guard_shim() -> bool:
     return True
 
 
+def install_layer_norm_shim() -> bool:
+    """CPU fallback for ``F.layer_norm`` when the vendor lacks the kernel.
+
+    SUPA dispatches LayerNorm to ``LayerNormInfer`` which is missing for some
+    normalized-shape/dtype combos ("no valid backend was found for op:
+    LayerNormInfer", htdemucs encoder norm).
+    """
+    if "layer_norm" in _installed:
+        return False
+    import torch.nn.functional as F
+
+    original = F.layer_norm
+
+    def layer_norm(input, normalized_shape, *args, **kwargs):
+        device = getattr(input, "device", None)
+        if device is not None and device.type == "supa":
+            try:
+                return original(input, normalized_shape, *args, **kwargs)
+            except RuntimeError as error:
+                if "no valid backend" not in str(error):
+                    raise
+            return original(input.cpu(), normalized_shape, *args, **kwargs).to(device)
+        return original(input, normalized_shape, *args, **kwargs)
+
+    layer_norm._vendor_shim = True
+    layer_norm._pymss_original = original
+    F.layer_norm = layer_norm
+    torch.nn.functional.layer_norm = layer_norm
+    _installed.add("layer_norm")
+    return True
+
+
 def install_linear_dtype_shim() -> bool:
     """Align ``F.linear`` dtypes on vendor devices.
 
@@ -1316,6 +1348,7 @@ SHIMS = {
     "linear_dtype": install_linear_dtype_shim,
     "embedding": install_embedding_shim,
     "matmul_guard": install_matmul_guard_shim,
+    "layer_norm": install_layer_norm_shim,
 }
 
 
@@ -1360,7 +1393,7 @@ def install_vendor_shims(
     """
     if device_type in ("cpu", "meta"):
         return []
-    wanted = ["fold", "complex_view", "linear_dtype", "embedding", "matmul_guard"]
+    wanted = ["fold", "complex_view", "linear_dtype", "embedding", "matmul_guard", "layer_norm"]
     if not complex_mul:
         wanted.append("complex_mul")
     if not complex_reshape:

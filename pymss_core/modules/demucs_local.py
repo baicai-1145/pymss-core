@@ -104,6 +104,9 @@ class BLSTM(nn.Module):
         if self.max_steps is not None and x.shape[-1] > self.max_steps:
             batch, channels, length = x.shape
             width, stride = self.max_steps, self.max_steps // 2
+            covered = width + stride * -(-(length - width) // stride)  # ceil
+            if covered > length:
+                x = torch.nn.functional.pad(x, (0, covered - length))
             frames = x.unfold(-1, width, stride)
             nframes, framed = frames.shape[2], True
             x = run(frames.permute(0, 2, 1, 3).reshape(-1, channels, width))
