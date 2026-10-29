@@ -55,7 +55,33 @@ class BLSTM(nn.Module):
             return self._forward_cpu(x.cpu()).to(device)
         return self._forward_torch(x)
     def _forward_cpu(self, x):
-        return self._forward_torch(x)
+        # torch_br's nn.LSTM patch routes even CPU tensors to SUPA; bypass it
+        # with the raw functional kernel (mirrors _forward_torch exactly).
+        lstm = self.lstm
+        weights = list(lstm._flat_weights)
+
+        def run(batch):  # (N, C, T) -> (N, C, T) through raw LSTM + linear
+            seq = batch.permute(2, 0, 1)
+            zeros_h = weights[0].new_zeros(lstm.num_layers * (2 if lstm.bidirectional else 1), seq.shape[1], lstm.hidden_size)
+            out = torch._VF.lstm(seq, (zeros_h, zeros_h.clone()), tuple(weights), lstm.bias,
+                                 lstm.num_layers, lstm.dropout, lstm.training,
+                                 lstm.bidirectional, False)[0]
+            return self.linear(out).permute(1, 2, 0)
+
+        y, framed = x, False
+        if self.max_steps is not None and x.shape[-1] > self.max_steps:
+            batch, channels, length = x.shape
+            width, stride = self.max_steps, self.max_steps // 2
+            frames = x.unfold(-1, width, stride)
+            nframes, framed = frames.shape[2], True
+            x = run(frames.permute(0, 2, 1, 3).reshape(-1, channels, width))
+        else:
+            x = run(x)
+        if framed:
+            frames = x.reshape(batch, -1, channels, width); limit = stride // 2
+            x = torch.cat([frames[:, i, :, limit if i else 0:-limit if i < nframes - 1 or not i else None]
+                           for i in range(nframes)], -1)[..., :length]
+        return x + y if self.skip else x
     def _forward_torch(self, x):
         y, framed = x, False
         if self.max_steps is not None and x.shape[-1] > self.max_steps:

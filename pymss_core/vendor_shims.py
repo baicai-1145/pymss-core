@@ -998,7 +998,12 @@ def install_rope_shim() -> bool:
                 and _FFN_BACKEND == 'vendor'
                 and _supa_fused_ffn_fwd is not None
                 and _ffn_fast_path_ok(self)):
-            return _vendor_fused_ffn(self, self.net[0](x))
+            try:
+                return _vendor_fused_ffn(self, self.net[0](x))
+            except RuntimeError:
+                # the vendor op rejects some configs (e.g. in-features 512:
+                # "no valid backend: Matmul" inside supa_fused_mlp); eager then
+                return original_feedforward_forward(self, x)
         return original_feedforward_forward(self, x)
 
     def rotate_qk_fast_bnhd(rotary_embed, q, k):
@@ -1133,7 +1138,7 @@ def install_embedding_shim() -> bool:
             try:
                 return weight.index_select(0, input.reshape(-1)).reshape(*input.shape, weight.shape[-1])
             except RuntimeError:
-                return original(weight=weight.cpu(), input=input.cpu(), *args, **kwargs).to(device)
+                return original(input.cpu(), weight.cpu(), *args, **kwargs).to(device)
         return original(input, weight, *args, **kwargs)
 
     embedding._vendor_shim = True
