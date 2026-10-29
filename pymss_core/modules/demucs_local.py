@@ -63,9 +63,20 @@ class BLSTM(nn.Module):
         def run(batch):  # (N, C, T) -> (N, C, T) through raw LSTM + linear
             seq = batch.permute(2, 0, 1)
             zeros_h = weights[0].new_zeros(lstm.num_layers * (2 if lstm.bidirectional else 1), seq.shape[1], lstm.hidden_size)
-            out = torch._VF.lstm(seq, (zeros_h, zeros_h.clone()), tuple(weights), lstm.bias,
-                                 lstm.num_layers, lstm.dropout, lstm.training,
-                                 lstm.bidirectional, False)[0]
+            # torch_br hooks aten::lstm itself and routes CPU tensors to the
+            # SUPA IR builder; its documented escape hatch forces the CPU kernel
+            import os
+            previous = os.environ.get("BRTB_ENABLE_SUPA_FALLBACK")
+            os.environ["BRTB_ENABLE_SUPA_FALLBACK"] = "1"
+            try:
+                out = torch._VF.lstm(seq, (zeros_h, zeros_h.clone()), tuple(weights), lstm.bias,
+                                     lstm.num_layers, lstm.dropout, lstm.training,
+                                     lstm.bidirectional, False)[0]
+            finally:
+                if previous is None:
+                    os.environ.pop("BRTB_ENABLE_SUPA_FALLBACK", None)
+                else:
+                    os.environ["BRTB_ENABLE_SUPA_FALLBACK"] = previous
             return self.linear(out).permute(1, 2, 0)
 
         y, framed = x, False

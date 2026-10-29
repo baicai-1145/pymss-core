@@ -103,12 +103,30 @@ def install_complex_mul_shim() -> bool:
     def mul(self, other):
         if _on_device(self) and _needs_plane_product(self, other):
             return complex_planes_product(self, other)
-        return original_mul(self, other)
+        try:
+            return original_mul(self, other)
+        except RuntimeError as error:
+            if getattr(self, "device", None) is None or self.device.type != "supa" or "supa function" not in str(error):
+                raise
+            # scalar-operand elementwise variants can lack a kernel: promote
+            # the scalar to a device tensor, then fall back to CPU
+            try:
+                return original_mul(self, torch.as_tensor(other, dtype=self.dtype, device=self.device))
+            except RuntimeError:
+                return original_mul(self.cpu(), torch.as_tensor(other)).to(self.device)
 
     def rmul(self, other):
         if _on_device(self) and _needs_plane_product(other, self):
             return complex_planes_product(other, self)
-        return original_rmul(self, other)
+        try:
+            return original_rmul(self, other)
+        except RuntimeError as error:
+            if getattr(self, "device", None) is None or self.device.type != "supa" or "supa function" not in str(error):
+                raise
+            try:
+                return original_rmul(self, torch.as_tensor(other, dtype=self.dtype, device=self.device))
+            except RuntimeError:
+                return original_rmul(self.cpu(), torch.as_tensor(other)).to(self.device)
 
     def mul_fn(a, b, *args, **kwargs):
         if not args and not kwargs and (_on_device(a) or _on_device(b)) and _needs_plane_product(a, b):
@@ -1194,10 +1212,29 @@ def install_linear_dtype_shim() -> bool:
 
     def linear(input, weight, bias=None, *args, **kwargs):
         device = getattr(input, "device", None)
-        if device is not None and device.type == "supa" and weight.dtype != input.dtype:
-            weight = weight.to(input.dtype)
+        if device is not None and device.type == "supa":
+            if weight.dtype != input.dtype:
+                weight = weight.to(input.dtype)
             if bias is not None and bias.dtype != input.dtype:
                 bias = bias.to(input.dtype)
+            try:
+                return original(input, weight, bias, *args, **kwargs)
+            except RuntimeError as error:
+                if "Sublas" not in str(error) and "no valid backend" not in str(error):
+                    raise
+            # batched 3-D GEMMs at some shapes fail (ErrorCode 7); a flattened
+            # single 2-D GEMM covers them, then CPU
+            try:
+                lead = input.shape[:-1]
+                flat = input.reshape(-1, input.shape[-1])
+                out = torch.matmul(flat, weight.t())
+                if bias is not None:
+                    out = out + bias
+                return out.reshape(*lead, weight.shape[0])
+            except RuntimeError:
+                return original(input.cpu(), weight.cpu(),
+                                bias.cpu() if bias is not None else None,
+                                *args, **kwargs).to(input.device)
         return original(input, weight, bias, *args, **kwargs)
 
     linear._vendor_shim = True
