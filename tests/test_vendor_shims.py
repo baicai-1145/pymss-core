@@ -404,3 +404,29 @@ class TestSdpaEquivalent:
         mask = torch.zeros(3, 3).masked_fill(torch.ones(3, 3, dtype=torch.bool).tril().logical_not(), float("-inf"))
         want = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask)
         assert torch.allclose(sdpa_equivalent(q, k, v, mask), want, atol=1e-5)
+
+
+class TestSdpaChunking:
+    """Some folded batch sizes cannot be planned, so the batch is walked in blocks."""
+
+    def test_chunked_matches_unchunked(self, monkeypatch):
+        from pymss_core.vendor_shims import sdpa_equivalent
+
+        torch.manual_seed(0)
+        q, k, v = (torch.randn(4, 3, 5, 8) for _ in range(3))
+        monkeypatch.setenv("PYMSS_SDPA_BATCH_CHUNK", "0")
+        whole = sdpa_equivalent(q, k, v)
+        monkeypatch.setenv("PYMSS_SDPA_BATCH_CHUNK", "5")
+        piecewise = sdpa_equivalent(q, k, v)
+        assert torch.allclose(whole, piecewise, atol=1e-6)
+
+    def test_chunked_causal_matches_unchunked(self, monkeypatch):
+        from pymss_core.vendor_shims import sdpa_equivalent
+
+        torch.manual_seed(0)
+        q, k, v = (torch.randn(2, 2, 4, 8) for _ in range(3))
+        monkeypatch.setenv("PYMSS_SDPA_BATCH_CHUNK", "0")
+        whole = sdpa_equivalent(q, k, v, is_causal=True)
+        monkeypatch.setenv("PYMSS_SDPA_BATCH_CHUNK", "3")
+        piecewise = sdpa_equivalent(q, k, v, is_causal=True)
+        assert torch.allclose(whole, piecewise, atol=1e-6)
