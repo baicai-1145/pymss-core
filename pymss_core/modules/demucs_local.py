@@ -48,6 +48,15 @@ def _freq_dconv(dconv, y): b, c, fr, t = y.shape; return dconv(y.permute(0, 2, 1
 class BLSTM(nn.Module):
     def __init__(self, dim, layers=1, max_steps=None, skip=False): super().__init__(); self.max_steps = max_steps; self.lstm = nn.LSTM(bidirectional=True, num_layers=layers, hidden_size=dim, input_size=dim); self.linear = nn.Linear(2 * dim, dim); self.skip = skip
     def forward(self, x):
+        # The vendor LSTM + unfold framing produce a length drift on SUPA
+        # (skip-add broadcast 800 vs 860); run the whole cell on CPU there.
+        if x.device.type == "supa":
+            device = x.device
+            return self._forward_cpu(x.cpu()).to(device)
+        return self._forward_torch(x)
+    def _forward_cpu(self, x):
+        return self._forward_torch(x)
+    def _forward_torch(self, x):
         y, framed = x, False
         if self.max_steps is not None and x.shape[-1] > self.max_steps:
             batch, channels, length = x.shape

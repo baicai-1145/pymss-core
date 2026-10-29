@@ -216,11 +216,24 @@ def scatter_add_equivalent(src: torch.Tensor, index: torch.Tensor, dim: int, siz
         The accumulated tensor with ``size`` slots along ``dim``.
     """
     slots = torch.arange(size, device=src.device, dtype=index.dtype)
-    one_hot = (index.unsqueeze(0) == slots.unsqueeze(1)).to(src.dtype)  # (size, numel)
-    moved = src.movedim(dim, -2) if dim >= 0 else src.movedim(dim, -2)
+    moved = src.movedim(dim, -2)
     leading = moved.shape[:-2]
     flat = moved.reshape(-1, moved.shape[-2], moved.shape[-1])
-    out = torch.matmul(one_hot, flat)  # (size, numel) x (N, numel, C) -> broadcast per N
+    index_1d = index.reshape(-1)
+    if src.device.type == "supa":
+        # The one-hot matmul hits SUBLAS broadcast limits ("no valid backend: Matmul"
+        # / ErrorCode 15). Real-dtype index_add_ is usable; fall back to a CPU
+        # one-hot matmul when even that fails.
+        out = torch.zeros(flat.shape[0], size, flat.shape[-1], device=src.device, dtype=src.dtype)
+        try:
+            for row in range(flat.shape[0]):
+                out[row].index_add_(0, index_1d, flat[row])
+        except RuntimeError:
+            one_hot = (index_1d.cpu().unsqueeze(0) == slots.cpu()).to(flat.cpu().dtype)
+            out = torch.matmul(one_hot, flat.cpu()).to(src.device)
+    else:
+        one_hot = (index_1d.unsqueeze(0) == slots.unsqueeze(1)).to(src.dtype)
+        out = torch.matmul(one_hot, flat)
     out = out.reshape(*leading, size, moved.shape[-1])
     if dim >= 0:
         return out.movedim(-2, dim)
@@ -1101,6 +1114,66 @@ def install_std_shim() -> bool:
 
 
 #: Shim name -> installer.
+def install_embedding_shim() -> bool:
+    """Gather-based ``F.embedding`` for vendor devices without the op.
+
+    SUPA has no Embedding backend at all ("no valid backend was found for op:
+    Embedding", demucs ScaledEmbedding path); ``weight.index_select(0, idx)``
+    is an exact equivalent built from supported kernels.
+    """
+    if "embedding" in _installed:
+        return False
+    import torch.nn.functional as F
+
+    original = F.embedding
+
+    def embedding(input, weight, *args, **kwargs):
+        device = getattr(weight, "device", None)
+        if device is not None and device.type == "supa":
+            try:
+                return weight.index_select(0, input.reshape(-1)).reshape(*input.shape, weight.shape[-1])
+            except RuntimeError:
+                return original(weight=weight.cpu(), input=input.cpu(), *args, **kwargs).to(device)
+        return original(input, weight, *args, **kwargs)
+
+    embedding._vendor_shim = True
+    embedding._pymss_original = original
+    F.embedding = embedding
+    _installed.add("embedding")
+    return True
+
+
+def install_matmul_guard_shim() -> bool:
+    """Catch "no valid backend: Matmul" on SUPA: complex -> real-plane
+    decomposition (4 real matmuls), anything else -> CPU roundtrip."""
+    if "matmul_guard" in _installed:
+        return False
+
+    original = torch.matmul
+
+    def matmul(a, b, *args, **kwargs):
+        try:
+            return original(a, b, *args, **kwargs)
+        except RuntimeError as error:
+            if getattr(a, "device", None) is None or a.device.type != "supa":
+                raise
+            if "no valid backend" not in str(error) and "Sublas" not in str(error):
+                raise
+        if torch.is_complex(a) or torch.is_complex(b):
+            ar, ai = torch.real(a), torch.imag(a)
+            br, bi = torch.real(b), torch.imag(b)
+            real = original(ar, br) - original(ai, bi)
+            imag = original(ar, bi) + original(ai, br)
+            return torch.complex(real, imag)
+        return original(a.cpu(), b.cpu()).to(a.device)
+
+    matmul._vendor_shim = True
+    matmul._pymss_original = original
+    torch.matmul = matmul
+    _installed.add("matmul_guard")
+    return True
+
+
 def install_linear_dtype_shim() -> bool:
     """Align ``F.linear`` dtypes on vendor devices.
 
@@ -1196,6 +1269,8 @@ SHIMS = {
     "fold": install_fold_shim,
     "complex_view": install_complex_view_shim,
     "linear_dtype": install_linear_dtype_shim,
+    "embedding": install_embedding_shim,
+    "matmul_guard": install_matmul_guard_shim,
 }
 
 
@@ -1240,7 +1315,7 @@ def install_vendor_shims(
     """
     if device_type in ("cpu", "meta"):
         return []
-    wanted = ["fold", "complex_view", "linear_dtype"]
+    wanted = ["fold", "complex_view", "linear_dtype", "embedding", "matmul_guard"]
     if not complex_mul:
         wanted.append("complex_mul")
     if not complex_reshape:
