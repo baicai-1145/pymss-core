@@ -45,12 +45,12 @@ def test_installed_router_scopes_vendor_backend_to_supa(monkeypatch, backend, de
 @pytest.mark.parametrize('options', [
     {'attn_mask': object()}, {'is_causal': True}, {'dropout_p': 0.1}, {'enable_gqa': True},
 ])
-def test_sudnn_router_rejects_unsupported_semantics_before_call(monkeypatch, options):
+def test_sudnn_router_falls_back_to_math_for_unsupported_semantics(monkeypatch, options):
     function, calls = install_router(monkeypatch, 'sudnn')
     q = query_for('supa')
-    with pytest.raises(NotImplementedError, match='unmasked inference'):
-        function(q, q, q, **options)
-    assert calls == []
+    result = function(q, q, q, **options)
+    assert calls == ['manual']
+    assert result == 'manual'
 
 
 def test_invalid_backend_fails_during_install(monkeypatch):

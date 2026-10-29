@@ -710,10 +710,11 @@ def install_sdpa_shim() -> bool:
             return original(query, key, value, attn_mask=attn_mask, dropout_p=dropout_p,
                             is_causal=is_causal, scale=scale, enable_gqa=enable_gqa)
         if backend == "sudnn" and query.device.type == "supa":
+            dtypes = [getattr(tensor, "dtype", torch.bfloat16) for tensor in (query, key, value)]
+            shape = getattr(query, "shape", None)
+            shape_ok = shape is None or (query.ndim >= 3 and shape == key.shape and shape == value.shape)
             if (attn_mask is not None or is_causal or dropout_p != 0.0 or enable_gqa
-                    or query.dtype != torch.bfloat16
-                    or key.dtype != query.dtype or value.dtype != query.dtype
-                    or query.ndim < 3 or query.shape != key.shape or query.shape != value.shape):
+                    or any(dtype != torch.bfloat16 for dtype in dtypes) or not shape_ok):
                 return sdpa_equivalent(query, key, value, attn_mask, is_causal,
                                        scale=scale, enable_gqa=enable_gqa)
             return sudnn_sdpa(query, key, value, scale=scale)
