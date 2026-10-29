@@ -892,6 +892,40 @@ def _vendor_rope_rotate_bhqd(rotary_embed, q, k):
     return outputs[0], outputs[1]
 
 
+_supa_fused_ffn_fwd = None
+_FFN_BACKEND = os.environ.get('PYMSS_FFN_BACKEND', 'vendor')
+
+
+def _ffn_fast_path_ok(module) -> bool:
+    """Structural gate: Sequential(RMSNorm, Linear, GELU, Dropout, Linear, Dropout)."""
+    import torch.nn as nn
+    from pymss_core.modules.bs_roformer.transformer import RMSNorm
+
+    net = module.net
+    if len(net) != 6:
+        return False
+    # Sequential(RMSNorm, Linear, GELU, Dropout, Linear, Dropout)
+    return (isinstance(net[0], RMSNorm)
+            and isinstance(net[1], nn.Linear) and isinstance(net[4], nn.Linear)
+            and isinstance(net[2], nn.GELU)
+            and isinstance(net[3], nn.Dropout) and isinstance(net[5], nn.Dropout)
+            and net[1].bias is not None and net[4].bias is not None
+            and float(net[3].p) == 0.0 and float(net[5].p) == 0.0)
+
+
+def _vendor_fused_ffn(module, normalized):
+    """Fused Linear->GELU->Linear via supa_fused_mlp_linear_act_linear_fwd.
+
+    act_mode='gelu' (lowercase only -- other spellings silently disable the
+    activation and corrupt the output; validated rel 0.41% vs eager bf16).
+    Returns output only (op returns [output, ...]).
+    """
+    first, second = module.net[1], module.net[4]
+    outputs = _supa_fused_ffn_fwd(normalized, first.weight, second.weight,
+                                  first.bias, second.bias, act_mode='gelu')
+    return outputs[0] if isinstance(outputs, (list, tuple)) else outputs
+
+
 def install_rope_shim() -> bool:
     """Route prepared rotary embeddings through the vendor RoPE kernel.
 
@@ -911,6 +945,22 @@ def install_rope_shim() -> bool:
 
     original = _transformer.rotate_qk_fast_bnhd
     original_attention_forward = _transformer.Attention.forward
+    original_feedforward_forward = _transformer.FeedForward.forward
+
+    global _supa_fused_ffn_fwd
+    if _supa_fused_ffn_fwd is None:
+        import torch_br
+        _supa_fused_ffn_fwd = torch_br.supa_fused_mlp_linear_act_linear_fwd
+
+    def feedforward_forward(self, x):
+        """Fused FFN core (one kernel) for SUPA bf16 inference; else original."""
+        if (x.device.type == "supa" and x.dtype == torch.bfloat16
+                and not self.training
+                and _FFN_BACKEND == 'vendor'
+                and _supa_fused_ffn_fwd is not None
+                and _ffn_fast_path_ok(self)):
+            return _vendor_fused_ffn(self, self.net[0](x))
+        return original_feedforward_forward(self, x)
 
     def rotate_qk_fast_bnhd(rotary_embed, q, k):
         if (q.device.type == "supa"
@@ -946,10 +996,12 @@ def install_rope_shim() -> bool:
 
     rotate_qk_fast_bnhd._pymss_original = original
     attention_forward._pymss_original = original_attention_forward
+    feedforward_forward._pymss_original = original_feedforward_forward
     logging.getLogger(__name__).info(
-        "Installed vendor RoPE shim (SUPA only; accelerate via prepare_model_for_vendor_rope)")
+        "Installed vendor RoPE + FFN shim (SUPA only; accelerate via prepare_model_for_vendor_rope)")
     _transformer.rotate_qk_fast_bnhd = rotate_qk_fast_bnhd
     _transformer.Attention.forward = attention_forward
+    _transformer.FeedForward.forward = feedforward_forward
     _installed.add("rope")
     return True
 

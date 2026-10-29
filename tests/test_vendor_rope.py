@@ -185,6 +185,42 @@ def test_vendor_rope_rotate_matches_reference(monkeypatch):
     assert q_out.shape == q_inter.shape
 
 
+def test_feedforward_fast_path_matches_eager(monkeypatch):
+    """The fused-FFN fast path must reproduce eager Linear->GELU->Linear."""
+    torch.manual_seed(0)
+    import torch.nn as nn
+    from pymss_core.modules.bs_roformer.transformer import FeedForward, RMSNorm
+
+    def mock_fwd(x, up_weight, down_weight, up_bias, down_bias, act_mode=None):
+        assert act_mode == 'gelu', 'activation must be requested explicitly'
+        hidden = torch.nn.functional.linear(x.float(), up_weight.float(), up_bias.float())
+        activated = torch.nn.functional.gelu(hidden)
+        return [torch.nn.functional.linear(activated, down_weight.float(), down_bias.float()).to(x.dtype)]
+
+    monkeypatch.setattr(vendor_shims, '_supa_fused_ffn_fwd', mock_fwd)
+    module = FeedForward(dim=32, mult=4)
+    assert vendor_shims._ffn_fast_path_ok(module)
+    x = torch.randn(2, 5, 32)
+    reference = module(x)
+    fast = vendor_shims._vendor_fused_ffn(module, module.net[0](x))
+    assert torch.allclose(reference, fast, atol=1e-4), 'fused FFN mismatch'
+
+
+def test_feedforward_structure_gate_rejects_variants():
+    import torch.nn as nn
+    from pymss_core.modules.bs_roformer.transformer import FeedForward
+
+    module = FeedForward(dim=32, mult=4)
+    assert vendor_shims._ffn_fast_path_ok(module)
+    module.net[2] = nn.ReLU()          # wrong activation
+    assert not vendor_shims._ffn_fast_path_ok(module)
+    module2 = FeedForward(dim=32, mult=4)
+    module2.net[1].bias = None          # bias-free projection
+    assert not vendor_shims._ffn_fast_path_ok(module2)
+    module3 = FeedForward(dim=32, mult=4, dropout=0.1)
+    assert not vendor_shims._ffn_fast_path_ok(module3)   # active dropout
+
+
 def test_vendor_rope_rotate_bhqd_matches_reference(monkeypatch):
     """The regrouped (B,H,S,D) rotate path equals the original route."""
     torch.manual_seed(0)
