@@ -658,9 +658,10 @@ def sdpa_equivalent(
     # Fold the leading batch/head dimensions into contiguous 3-D operands.
     lead = query.shape[:-2]
     length, dim = query.shape[-2], query.shape[-1]
+    kv_length = key.shape[-2]
     flat_q = query.reshape(-1, length, dim).contiguous()
-    flat_k = key.reshape(-1, length, dim).contiguous()
-    flat_v = value.reshape(-1, length, dim).contiguous()
+    flat_k = key.reshape(-1, kv_length, dim).contiguous()
+    flat_v = value.reshape(-1, kv_length, dim).contiguous()
     # Historical end-to-end measurements favored 1024 over 256. Those runs
     # excluded SDK Python paths, so their shape failures are not backend limits.
     # Frequency attention folds 862 frames * 8 heads = 6896 batches (7 chunks).
@@ -689,7 +690,7 @@ def sdpa_equivalent(
         if attn_mask is not None:
             scores = scores + attn_mask.reshape(scores.shape[-2:])
         elif is_causal:
-            mask = torch.ones(length, length, dtype=torch.bool, device=query.device).tril()
+            mask = torch.ones(length, kv_length, dtype=torch.bool, device=query.device).tril()
             scores = scores.masked_fill(~mask, float("-inf"))
         probs = torch.softmax(scores, dim=-1)
         values = []
@@ -1200,6 +1201,49 @@ def install_matmul_guard_shim() -> bool:
     return True
 
 
+def install_conv_transpose1d_shim() -> bool:
+    """Dtype ladder for ``F.conv_transpose1d`` on vendor devices.
+
+    The vendor implements transposed conv through a grad-style kernel that
+    requires matching dtypes ("grad_output: BF16 <-> FP32"); align weight/bias
+    to the activation, retry unified fp32, then CPU.
+    """
+    if "conv_transpose1d" in _installed:
+        return False
+    import torch.nn.functional as F
+
+    original = F.conv_transpose1d
+
+    def conv_transpose1d(input, weight, bias=None, stride=1, padding=0,
+                         output_padding=0, groups=1, dilation=1):
+        device = getattr(input, "device", None)
+        if device is None or device.type != "supa":
+            return original(input, weight, bias, stride, padding, output_padding,
+                            groups, dilation)
+        if weight.dtype != input.dtype:
+            weight = weight.to(input.dtype)
+        if bias is not None and bias.dtype != input.dtype:
+            bias = bias.to(input.dtype)
+        try:
+            return original(input, weight, bias, stride, padding, output_padding,
+                            groups, dilation)
+        except RuntimeError:
+            pass
+        try:
+            return original(input.float(), weight.float(),
+                            bias.float() if bias is not None else None,
+                            stride, padding, output_padding, groups, dilation)
+        except RuntimeError:
+            return original(input.cpu(), weight.cpu(),
+                            bias.cpu() if bias is not None else None,
+                            stride, padding, output_padding, groups, dilation).to(input.device)
+
+    conv_transpose1d._vendor_shim = True
+    F.conv_transpose1d = conv_transpose1d
+    _installed.add("conv_transpose1d")
+    return True
+
+
 def install_layernorm_module_shim() -> bool:
     """Restore reference ``nn.LayerNorm.forward`` on vendor stacks.
 
@@ -1372,6 +1416,7 @@ SHIMS = {
     "matmul_guard": install_matmul_guard_shim,
     "layer_norm": install_layer_norm_shim,
     "layernorm_module": install_layernorm_module_shim,
+    "conv_transpose1d": install_conv_transpose1d_shim,
 }
 
 
@@ -1416,7 +1461,7 @@ def install_vendor_shims(
     """
     if device_type in ("cpu", "meta"):
         return []
-    wanted = ["fold", "complex_view", "linear_dtype", "embedding", "matmul_guard", "layer_norm", "layernorm_module"]
+    wanted = ["fold", "complex_view", "linear_dtype", "embedding", "matmul_guard", "layer_norm", "layernorm_module", "conv_transpose1d"]
     if not complex_mul:
         wanted.append("complex_mul")
     if not complex_reshape:
