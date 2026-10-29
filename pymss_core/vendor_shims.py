@@ -16,6 +16,8 @@ window is built on the host (a few hundred floats).
 from __future__ import annotations
 
 import os
+import logging
+import warnings
 
 import torch
 
@@ -574,10 +576,9 @@ def sdpa_equivalent(
 ) -> torch.Tensor:
     """``scaled_dot_product_attention`` as explicit matmuls.
 
-    BIREN's SUDNN fails to plan the fused kernel for a production roformer's batch
-    (``(862, 8, 62, 64)`` answers ``SudnnPlanBuilder.h:667 Failed to finalize
-    engine config descriptor``), and the vendor documents SDPA as bf16/fp32 only.
-    With ``dim_head`` at 64 the three matmuls are the natural formulation anyway.
+    This remains the default vendor fallback. Earlier planner failures were
+    observed with SDK compiler paths removed from PYTHONPATH; they do not establish
+    a hardware or JIT limitation. The explicit suDNN FMHA backend is separate.
 
     Args:
         query, key, value: ``(..., T, E)`` tensors.
@@ -602,23 +603,16 @@ def sdpa_equivalent(
         key = key.contiguous()
     if not value.is_contiguous():
         value = value.contiguous()
-    # BIREN's SUDNN tries to JIT-compile a kernel for 4-D batched matmuls and its
-    # compiler is broken in this image ("Failed to init python", "Failed to build
-    # the assembly code"), which shows up as
-    # "SudnnPlanBuilder.h:667 Failed to finalize engine config descriptor".  A plain
-    # contiguous 3-D bmm hits the prebuilt kernels, so the leading dimensions are
-    # folded together and the math stays identical.
+    # Fold the leading batch/head dimensions into contiguous 3-D operands.
     lead = query.shape[:-2]
     length, dim = query.shape[-2], query.shape[-1]
     flat_q = query.reshape(-1, length, dim).contiguous()
     flat_k = key.reshape(-1, length, dim).contiguous()
     flat_v = value.reshape(-1, length, dim).contiguous()
-    # SUDNN refuses to compile the GE kernel for some folded batches (1384, 1385 and
-    # 2048 all fail while 173/346/692/1024 succeed), and a production roformer folds
-    # 53444 rows.  Blocks of 1024 keep every bmm on a prebuilt kernel while issuing
-    # 52 calls instead of the 209 that a block of 256 needs, which measured 3820 ms
-    # against 4935 ms for the whole model.  0 disables the split and 512/256 are the
-    # fallbacks if a particular model lands on a batch that cannot be planned.
+    # Historical end-to-end measurements favored 1024 over 256. Those runs
+    # excluded SDK Python paths, so their shape failures are not backend limits.
+    # Frequency attention folds 862 frames * 8 heads = 6896 batches (7 chunks).
+    # Keep the chunk configurable; 0 disables it.
     chunk = int(os.environ.get("PYMSS_SDPA_BATCH_CHUNK", "1024"))
     if chunk and flat_q.shape[0] > chunk:
         # Inside a whole model the vendor refuses even batches that a standalone
@@ -665,6 +659,28 @@ def sdpa_equivalent(
     return out.reshape(*lead, length, dim)
 
 
+def sudnn_sdpa(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor,
+               *, scale: float | None = None) -> torch.Tensor:
+    """Biren's explicit FMHA entry, validated for unmasked bf16 self-attention.
+
+    Unlike F.sdpa (which selects the math implementation in this SDK), this calls
+    the vendor operator directly. Its descriptor accepts 3-D operands, so fold
+    batch and heads and restore them on output. SDK PYTHONPATH must be preserved
+    for the JIT's br_generator module. Errors propagate rather than silently
+    reverting to the math path.
+    """
+    if query.dtype != torch.bfloat16 or key.dtype != query.dtype or value.dtype != query.dtype:
+        raise ValueError("Biren suDNN backend requires bf16 query, key and value")
+    if query.ndim < 3 or query.shape != key.shape or query.shape != value.shape:
+        raise ValueError("Biren suDNN backend requires matching self-attention shapes")
+    length, dim = query.shape[-2:]
+    operands = [tensor.reshape(-1, length, dim).contiguous() for tensor in (query, key, value)]
+    scale = dim ** -0.5 if scale is None else scale
+    output = torch.ops.supa.sudnn_scaled_dot_product_attention_fwd(
+        *operands, None, 0.0, False, scale, "FMHA", None, None)[0]
+    return output.reshape(query.shape)
+
+
 def install_sdpa_shim() -> bool:
     """Replace ``F.scaled_dot_product_attention`` on vendor devices.
 
@@ -677,45 +693,264 @@ def install_sdpa_shim() -> bool:
 
     original = functional.scaled_dot_product_attention
 
-    vendor_chunk = int(os.environ.get("PYMSS_SDPA_VENDOR_CHUNK", "0"))
-    vendor_broken = set()
+    backend = os.environ.get("PYMSS_SDPA_BACKEND", "manual")
+    if backend not in ("manual", "sudnn"):
+        raise ValueError("PYMSS_SDPA_BACKEND must be manual or sudnn")
+    if "PYMSS_SDPA_VENDOR_CHUNK" in os.environ:
+        warnings.warn("PYMSS_SDPA_VENDOR_CHUNK is obsolete; select PYMSS_SDPA_BACKEND=manual or sudnn",
+                      FutureWarning, stacklevel=2)
 
     def scaled_dot_product_attention(query, key, value, attn_mask=None, dropout_p=0.0,
                                      is_causal=False, *, scale=None, enable_gqa=False):
         if query.device.type in ("cpu", "meta") or query.is_cuda:
             return original(query, key, value, attn_mask=attn_mask, dropout_p=dropout_p,
                             is_causal=is_causal, scale=scale, enable_gqa=enable_gqa)
-        # The vendor's fused kernel handles the folded 3-D shape in a fresh process at
-        # 16.2 ms where the explicit matmuls need 47.4 ms, and chunking the batch keeps
-        # it off the plan sizes that fail.  Opt-in, because inside a whole model the
-        # planner sometimes refuses a shape it accepts on its own.
-        if vendor_chunk and not (attn_mask is not None or is_causal or dropout_p > 0.0):
-            lead = query.shape[:-2]
-            length, dim = query.shape[-2], query.shape[-1]
-            key_id = (tuple(lead), length, dim, str(query.dtype))
-            if key_id not in vendor_broken:
-                try:
-                    flat_q = query.reshape(-1, length, dim).contiguous()
-                    flat_k = key.reshape(-1, length, dim).contiguous()
-                    flat_v = value.reshape(-1, length, dim).contiguous()
-                    parts = []
-                    for start in range(0, flat_q.shape[0], vendor_chunk):
-                        stop = min(start + vendor_chunk, flat_q.shape[0])
-                        parts.append(original(flat_q[start:stop], flat_k[start:stop],
-                                              flat_v[start:stop], scale=scale))
-                    out = parts[0] if len(parts) == 1 else torch.cat(parts, dim=0)
-                    return out.reshape(*lead, length, dim)
-                except Exception:
-                    # Remember the shape so a model pays the planning cost once, then
-                    # falls back for the rest of the run.
-                    vendor_broken.add(key_id)
+        if backend == "sudnn" and query.device.type == "supa":
+            if attn_mask is not None or is_causal or dropout_p != 0.0 or enable_gqa:
+                raise NotImplementedError("Biren suDNN backend supports unmasked inference self-attention")
+            return sudnn_sdpa(query, key, value, scale=scale)
         return sdpa_equivalent(query, key, value, attn_mask, dropout_p, is_causal,
                                scale=scale, enable_gqa=enable_gqa)
 
     scaled_dot_product_attention._vendor_shim = True
+    scaled_dot_product_attention._pymss_sdpa_backend = backend
+    logging.getLogger(__name__).info("Installed vendor SDPA backend: %s (sudnn applies to SUPA only)", backend)
     functional.scaled_dot_product_attention = scaled_dot_product_attention
     torch.scaled_dot_product_attention = scaled_dot_product_attention
     _installed.add("sdpa")
+    return True
+
+
+#: supa_rope_apply launch contract, measured with pymss/tools/vendor_rope_shape_sweep2.py
+#: and vendor_rope_seq_accuracy.py on BIREN106M / torch-br 1.7.0.20700:
+#: * dim0 (batch*heads) must be <= 1024 -- larger launches fail or hang, so the
+#:   rotate is chunked along dim0 (dim0 slices of a contiguous tensor are free).
+#: * x must be bf16 (batch*heads, seq, head_dim) in the op's SPLIT-HALF pairing:
+#:   it rotates component i with component i+head_dim/2, while BS-Roformer q/k
+#:   channels are interleaved pairs (2i, 2i+1).  prepare_model_for_vendor_rope()
+#:   permutes to_qkv output rows per head into [evens | odds] order so the
+#:   projection itself emits the op's pairing at zero cost (measured: folding
+#:   the unpack into the weights is what makes the vendor path a win -- a runtime
+#:   cat-unpack regressed below the original path).
+#: * tables must be fp32 (bf16 is rejected by schema) shaped (1, seq, head_dim)
+#:   as concat([half, half], -1); x must be bf16, seq up to 4096 measured fine.
+#: * the op output keeps the halves layout, which is exactly the [even | odd]
+#:   layout apply_rotary_emb_fast returns, so downstream code is unchanged.
+#: End-to-end (10 s stereo, dim=384, depth=12): 1858 -> 1765 ms (-5.0%) with
+#: relative-to-fp32 1.5705% vs the original path's 1.5714% (probe logs
+#: rope-v3/v5 rounds, .tmp/br-rope-model-ab.json).
+_ROPE_MAX_BATCH = 1024
+_rope_row_index_cache: dict[tuple[int, int], torch.Tensor] = {}
+
+
+def _supa_rope_apply(x, cos, sin):
+    """Call the vendor RoPE op (standalone so tests can substitute it)."""
+    return torch.ops.supa.supa_rope_apply(x, cos, sin)
+
+
+def _rope_row_index(heads: int, dim_head: int) -> torch.Tensor:
+    """Permutation putting each head's q/k rows in [evens | odds] channel order."""
+    key = (heads, dim_head)
+    if key not in _rope_row_index_cache:
+        evens_odds = list(range(0, dim_head, 2)) + list(range(1, dim_head, 2))
+        index = (
+            [head * dim_head + j for head in range(heads) for j in evens_odds]
+            + [heads * dim_head + head * dim_head + j for head in range(heads) for j in evens_odds]
+            + list(range(2 * heads * dim_head, 3 * heads * dim_head))
+        )
+        _rope_row_index_cache[key] = torch.tensor(index, dtype=torch.long)
+    return _rope_row_index_cache[key]
+
+
+def _rope_chunked(x, cos, sin, batch: int):
+    """Apply the vendor op, splitting along dim0 to honor the 1024-row launch cap."""
+    if batch <= _ROPE_MAX_BATCH:
+        return _supa_rope_apply(x, cos, sin)
+    chunks = -(-batch // _ROPE_MAX_BATCH)
+    step = -(-batch // chunks)
+    return torch.cat([_supa_rope_apply(piece, cos, sin) for piece in x.split(step, dim=0)], dim=0)
+
+
+def _vendor_rope_rotate(rotary_embed, q, k):
+    """Vendor RoPE for already-prepared models; mirrors rotate_qk_fast_bnhd."""
+    from pymss_core.modules.bs_roformer import transformer as _transformer
+
+    b, s, h, d = q.shape
+    batch = b * h
+    cos, sin = _transformer.cached_rotary_cos_sin(rotary_embed, s, q.device, torch.float32)
+    table_cos = torch.cat((cos, cos), dim=-1).reshape(1, s, d).contiguous()
+    table_sin = torch.cat((sin, sin), dim=-1).reshape(1, s, d).contiguous()
+    outputs = []
+    for tensor in (q, k):
+        flat = tensor.permute(0, 2, 1, 3).reshape(batch, s, d)
+        if not flat.is_contiguous():
+            flat = flat.contiguous()
+        outputs.append(_rope_chunked(flat, table_cos, table_sin, batch).view(b, h, s, d).transpose(1, 2))
+    return outputs[0], outputs[1]
+
+
+def prepare_model_for_vendor_rope(model) -> list[str]:
+    """Rearrange ``to_qkv`` rows so the vendor RoPE op sees its split-half pairing.
+
+    Must run AFTER loading a raw checkpoint and BEFORE the first forward.  A
+    ``load_state_dict`` post-hook re-permutes fresh (raw) checkpoint loads, so
+    reloading after preparation stays correct; loading an ALREADY permuted
+    state dict is not supported.  Models that never call this keep the original
+    rotary path -- the installed shim only accelerates rotary embeddings marked
+    here, so skipping the call is always numerically safe.
+
+    Args:
+        model: A model containing ``Attention`` modules (``to_qkv`` + rotary).
+
+    Returns:
+        The names of the ``to_qkv`` modules that were permuted.
+    """
+    prepared = []
+
+    def permute_once(name, attention):
+        heads = getattr(attention, "heads", None)
+        linear = getattr(attention, "to_qkv", None)
+        rotary = getattr(attention, "rotary_embed", None)
+        if heads is None or linear is None or rotary is None:
+            return
+        if getattr(linear, "_pymss_rope_permuted", False):
+            prepared.append(name + ".to_qkv")
+            return
+        out_features = linear.out_features
+        if out_features % (3 * heads) != 0:
+            raise ValueError(f"{name}: to_qkv out_features {out_features} not divisible by 3*heads={3 * heads}")
+        dim_head = out_features // (3 * heads)
+        if dim_head % 2 != 0:
+            raise ValueError(f"{name}: odd head dim {dim_head} cannot be split into pairs")
+        index = _rope_row_index(heads, dim_head).to(linear.weight.device)
+        with torch.no_grad():
+            linear.weight.data = linear.weight.data[index]
+            if linear.bias is not None:
+                linear.bias.data = linear.bias.data[index]
+        linear._pymss_rope_permuted = True
+        rotary._pymss_vendor_rope = True
+        prepared.append(name + ".to_qkv")
+
+    for name, module in model.named_modules():
+        if hasattr(module, "to_qkv") and hasattr(module, "rotary_embed"):
+            permute_once(name, module)
+
+    if prepared:
+        def _repermute(module, incompatible_keys):
+            for name, sub in module.named_modules():
+                linear = getattr(sub, "to_qkv", None)
+                if linear is None or not getattr(linear, "_pymss_rope_permuted", False):
+                    continue
+                heads = sub.heads
+                dim_head = linear.out_features // (3 * heads)
+                index = _rope_row_index(heads, dim_head).to(linear.weight.device)
+                with torch.no_grad():
+                    linear.weight.data = linear.weight.data[index]
+                    if linear.bias is not None:
+                        linear.bias.data = linear.bias.data[index]
+
+        model.register_load_state_dict_post_hook(_repermute)
+    return prepared
+
+
+def _vendor_rope_rotate_trio(rotary_embed, trio):
+    """Vendor RoPE for the regrouped (3, B, H, S, D) projection tensor.
+
+    q and k are the first two slices of one contiguous allocation, so they can
+    be rotated in a single flattened view (2*B*H, S, D) -- one launch (or half
+    as many chunks) instead of two separate calls, with no extra copies.
+    """
+    from pymss_core.modules.bs_roformer import transformer as _transformer
+
+    _, b, h, s, d = trio.shape
+    cos, sin = _transformer.cached_rotary_cos_sin(rotary_embed, s, trio.device, torch.float32)
+    table_cos = torch.cat((cos, cos), dim=-1).reshape(1, s, d).contiguous()
+    table_sin = torch.cat((sin, sin), dim=-1).reshape(1, s, d).contiguous()
+    flat = trio[:2].reshape(2 * b * h, s, d)
+    out = _rope_chunked(flat, table_cos, table_sin, 2 * b * h)
+    out = out.view(2, b, h, s, d)
+    return out[0], out[1]
+
+
+def _vendor_rope_rotate_bhqd(rotary_embed, q, k):
+    """Vendor RoPE on already-regrouped (B, H, S, D) contiguous tensors.
+
+    Used by the Attention fast path: the qkv projection is regrouped once into
+    (3, B, H, S, D), so q/k reshape to (B*H, S, D) for free and the op output
+    views back without any further copies.  Measured bit-identical to the
+    original forward and -89.5 ms end-to-end (probe: br-attention-chain.json).
+    """
+    from pymss_core.modules.bs_roformer import transformer as _transformer
+
+    b, h, s, d = q.shape
+    cos, sin = _transformer.cached_rotary_cos_sin(rotary_embed, s, q.device, torch.float32)
+    table_cos = torch.cat((cos, cos), dim=-1).reshape(1, s, d).contiguous()
+    table_sin = torch.cat((sin, sin), dim=-1).reshape(1, s, d).contiguous()
+    outputs = []
+    for tensor in (q, k):
+        outputs.append(_rope_chunked(tensor.reshape(b * h, s, d), table_cos, table_sin, b * h).view(b, h, s, d))
+    return outputs[0], outputs[1]
+
+
+def install_rope_shim() -> bool:
+    """Route prepared rotary embeddings through the vendor RoPE kernel.
+
+    Non-SUPA devices and rotary embeddings that were never passed through
+    :func:`prepare_model_for_vendor_rope` keep ``rotate_qk_fast_bnhd`` untouched,
+    so installing the shim alone never changes numerics.
+
+    Returns:
+        ``True`` when the shim was installed, ``False`` when it already was or
+        the vendor op is unavailable in this build.
+    """
+    if "rope" in _installed:
+        return False
+    if getattr(torch.ops.supa, "supa_rope_apply", None) is None:
+        return False
+    from pymss_core.modules.bs_roformer import transformer as _transformer
+
+    original = _transformer.rotate_qk_fast_bnhd
+    original_attention_forward = _transformer.Attention.forward
+
+    def rotate_qk_fast_bnhd(rotary_embed, q, k):
+        if (q.device.type == "supa"
+                and getattr(rotary_embed, "_pymss_vendor_rope", False)
+                and getattr(torch.ops.supa, "supa_rope_apply", None) is not None):
+            return _vendor_rope_rotate(rotary_embed, q, k)
+        return original(rotary_embed, q, k)
+
+    def attention_forward(self, x):
+        """Regrouped qkv chain for prepared SUPA bf16 rotary attention.
+
+        One (3, B, H, S, D) copy replaces the three scattered copies (q and k
+        permutes inside the rotate plus the SDPA shim's v ``.contiguous()``);
+        rotary and the FMHA adapter then run on free views.  Everything else --
+        other devices, dtypes, PoPE, training mode, unprepared models -- keeps
+        the original forward.
+        """
+        if (x.device.type == "supa" and x.dtype == torch.bfloat16
+                and not self.training
+                and self.rotary_embed is not None and self.pope_embed is None
+                and getattr(self.rotary_embed, "_pymss_vendor_rope", False)
+                and getattr(torch.ops.supa, "supa_rope_apply", None) is not None):
+            heads = self.heads
+            dim_head = self.to_qkv.out_features // (3 * heads)
+            normalized = self.norm(x)
+            qkv = self.to_qkv(normalized)
+            b, n, _ = qkv.shape
+            trio = qkv.view(b, n, 3, heads, dim_head).permute(2, 0, 3, 1, 4).contiguous()
+            q, k = _vendor_rope_rotate_trio(self.rotary_embed, trio)
+            out = self._attention(q, k, trio[2])
+            return self.to_out((out.transpose(1, 2) * self.to_gates(normalized).sigmoid().unsqueeze(-1)).flatten(start_dim=-2))
+        return original_attention_forward(self, x)
+
+    rotate_qk_fast_bnhd._pymss_original = original
+    attention_forward._pymss_original = original_attention_forward
+    logging.getLogger(__name__).info(
+        "Installed vendor RoPE shim (SUPA only; accelerate via prepare_model_for_vendor_rope)")
+    _transformer.rotate_qk_fast_bnhd = rotate_qk_fast_bnhd
+    _transformer.Attention.forward = attention_forward
+    _installed.add("rope")
     return True
 
 
@@ -801,6 +1036,7 @@ SHIMS = {
     "std": install_std_shim,
     "cpu": install_cpu_shim,
     "sdpa": install_sdpa_shim,
+"rope": install_rope_shim,
 }
 
 
@@ -819,6 +1055,7 @@ def install_vendor_shims(
     std: bool = False,
     cpu: bool = False,
     sdpa: bool = False,
+    rope: bool = False,
 ) -> list[str]:
     """Install the shims a device profile asks for.
 
@@ -836,6 +1073,8 @@ def install_vendor_shims(
         std: ``True`` when ``Tensor.std`` must be rebuilt from ``var``.
         cpu: ``True`` when a non-contiguous host copy must go via ``contiguous``.
         sdpa: ``True`` when fused attention must be expressed as matmuls.
+        rope: ``True`` when the vendor RoPE kernel should replace the rotary
+            path for models prepared with ``prepare_model_for_vendor_rope``.
 
     Returns:
         The shim names that were installed by this call.
@@ -867,6 +1106,8 @@ def install_vendor_shims(
         wanted.append("cpu")
     if sdpa:
         wanted.append("sdpa")
+    if rope:
+        wanted.append("rope")
     installed = []
     for name in wanted:
         if SHIMS[name]():

@@ -130,6 +130,7 @@ class DeviceProfile:
     std_shim: bool = False
     cpu_shim: bool = False
     sdpa_shim: bool = False
+    rope_shim: bool = False
     scatter_add: bool = True
     dilated_conv_allowed: frozenset[tuple[int, int]] = frozenset()
     amp: bool = True
@@ -205,6 +206,7 @@ _PROFILES: dict[str, DeviceProfile] = {
         dilated_conv_allowed=frozenset({(1, 1), (2, 2)}),
         complex_mul=False, complex_reshape=False, window_on_device=False, glu_shim=True,
         group_norm_shim=True, interpolate_shim=True, grouped_conv1d=True, complex_cat=True, fft_shim=True, std_shim=True, cpu_shim=True, sdpa_shim=True,
+        rope_shim=True,
         scatter_add=False,
     ),
     MLU: DeviceProfile(MLU, "mlu", plugin="torch_mlu"),
@@ -309,7 +311,7 @@ def detect_vendor(device_type: str) -> str:
 
 
 def _with_overrides(profile: DeviceProfile) -> DeviceProfile:
-    """Apply ``PYMSS_FFT_FALLBACK`` / ``PYMSS_RNN_FALLBACK`` / ``PYMSS_AMP``."""
+    """Apply ``PYMSS_FFT_FALLBACK`` / ``PYMSS_RNN_FALLBACK`` / ``PYMSS_AMP`` / ``PYMSS_ROPE_BACKEND``."""
     updates: dict[str, bool] = {}
     fft_fallback = _env_flag("PYMSS_FFT_FALLBACK")
     if fft_fallback is not None:
@@ -320,6 +322,9 @@ def _with_overrides(profile: DeviceProfile) -> DeviceProfile:
     amp = _env_flag("PYMSS_AMP")
     if amp is not None:
         updates["amp"] = amp
+    rope = os.environ.get("PYMSS_ROPE_BACKEND", "").strip().lower()
+    if rope in ("manual", "vendor"):
+        updates["rope_shim"] = rope == "vendor"
     return replace(profile, **updates) if updates else profile
 
 
@@ -500,6 +505,7 @@ def prepare_device_alias(alias: str) -> str:
         std=profile_now.std_shim,
         cpu=profile_now.cpu_shim,
         sdpa=profile_now.sdpa_shim,
+        rope=profile_now.rope_shim,
     )
     # Recurrent cells: the fused _VF.lstm is both wrong and catastrophically slow
     # on BIREN (605 s for one (18, 57, 128) call), and the profile already says
