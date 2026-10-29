@@ -42,10 +42,20 @@ def _sdpa_with_backend(q, k, v, dropout_p, backend, scale=None):
     with kernel(enum):
         return F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p, scale=scale)
 def _xformers_attention(q, k, v, dropout_p): import xformers.ops as xops; return xops.memory_efficient_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), p=dropout_p).transpose(1, 2)
+#: Devices where the complex-multiply path measured fastest (4.7x on CUDA/MPS).
+_COMPLEX_ROTARY_DEVICES = frozenset({"cuda", "mps"})
+
+
 def apply_rotary_emb_fast(cos, sin, t):
-    if t.dtype == torch.float32 or (t.is_cuda and t.dtype == torch.float16):
-        # complex-multiply path: one fused mul per pair instead of 4 muls + 2 strided writes (~4.7x on this op).
-        # fp32 drift vs the strided form is ~8 ulp (fma reassociation) — far inside the 1e-4 parity gate.
+    # On BIREN the complex route costs 122 ms per call for the (62, 862, 8, 64) tensors
+    # a production roformer rotates, against 35 ms for the strided form (3.5x): the
+    # complex multiply goes through view_as_complex/view_as_real, which the vendor
+    # shims have to split into real planes, while four muls and two strided writes do
+    # not.  CUDA/MPS measured the opposite (4.7x for the complex route), so the choice
+    # follows the device rather than one global assumption.
+    if t.device.type in _COMPLEX_ROTARY_DEVICES and (
+        t.dtype == torch.float32 or (t.is_cuda and t.dtype == torch.float16)
+    ):
         rot = torch.complex(cos, sin)
         rotated = torch.view_as_complex(t.reshape(*t.shape[:-1], -1, 2)) * rot
         return torch.view_as_real(rotated).reshape_as(t)
@@ -54,6 +64,8 @@ def apply_rotary_emb_fast(cos, sin, t):
     torch.sub(t_even * cos, t_odd * sin, out=out[..., ::2])
     torch.add(t_odd * cos, t_even * sin, out=out[..., 1::2])
     return out
+
+
 def cached_rotary_cos_sin(rotary_embed, seq_len, device, dtype):
     cache = getattr(rotary_embed, "_pymss_cos_sin_cache", None)
     if cache is None: rotary_embed._pymss_cos_sin_cache = cache = {}

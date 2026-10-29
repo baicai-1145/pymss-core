@@ -335,3 +335,38 @@ def test_prepare_device_installs_the_rnn_fallback(monkeypatch):
     dev.prepare_device_alias("biren")
 
     assert calls == ["rnn"]
+
+
+class TestRotaryPathChoice:
+    """The two rotary formulations must agree; only their speed differs."""
+
+    def test_strided_and_complex_paths_match(self):
+        import torch
+
+        from pymss_core.modules.bs_roformer.transformer import apply_rotary_emb_fast
+
+        torch.manual_seed(0)
+        t = torch.randn(2, 3, 4, 8)
+        cos = torch.randn(1, 3, 1, 4)
+        sin = torch.randn(1, 3, 1, 4)
+        got = apply_rotary_emb_fast(cos, sin, t)  # CPU takes the strided path
+        rot = torch.complex(cos, sin)
+        rotated = torch.view_as_complex(t.reshape(*t.shape[:-1], -1, 2)) * rot
+        want = torch.view_as_real(rotated).reshape_as(t)
+        assert torch.allclose(got, want, atol=1e-5)
+
+    def test_strided_path_handles_non_contiguous_input(self):
+        import torch
+
+        from pymss_core.modules.bs_roformer.transformer import apply_rotary_emb_fast
+
+        torch.manual_seed(0)
+        base = torch.randn(2, 4, 3, 8)
+        t = base.transpose(1, 2)
+        cos = torch.randn(1, 3, 1, 4)
+        sin = torch.randn(1, 3, 1, 4)
+        got = apply_rotary_emb_fast(cos, sin, t)
+        rot = torch.complex(cos, sin)
+        rotated = torch.view_as_complex(t.reshape(*t.shape[:-1], -1, 2).contiguous()) * rot
+        want = torch.view_as_real(rotated).reshape(t.shape)
+        assert torch.allclose(got, want, atol=1e-5)
