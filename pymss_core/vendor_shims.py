@@ -1153,9 +1153,13 @@ def install_embedding_shim() -> bool:
     def embedding(input, weight, *args, **kwargs):
         device = getattr(weight, "device", None)
         if device is not None and device.type == "supa":
-            # index_select can hard-abort the process (SUPA Pointwise launch
-            # error, SIGABRT, uncatchable); embeddings are tiny -- CPU is safe
-            return original(input.cpu(), weight.cpu(), *args, **kwargs).to(device)
+            # aten::embedding is hooked device-blind (hard abort on some
+            # shapes); a one-hot matmul uses only proven SUPA kernels
+            flat = input.reshape(-1)
+            slots = torch.arange(weight.shape[0], device=weight.device)
+            one_hot = (flat.unsqueeze(1) == slots.unsqueeze(0)).to(weight.dtype)
+            out = torch.matmul(one_hot, weight)
+            return out.reshape(*input.shape, weight.shape[-1])
         return original(input, weight, *args, **kwargs)
 
     embedding._vendor_shim = True

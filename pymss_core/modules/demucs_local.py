@@ -111,8 +111,12 @@ class BLSTM(nn.Module):
             x = run(x)
         if framed:
             frames = x.reshape(batch, -1, channels, width); limit = stride // 2
-            x = torch.cat([frames[:, i, :, limit if i else 0:-limit if i < nframes - 1 or not i else None]
-                           for i in range(nframes)], -1)[..., :length]
+            pieces = []
+            for i in range(nframes):
+                lo = limit if i else 0
+                hi = width if not (i < nframes - 1 or not i) else width - limit
+                pieces.append(frames[:, i, :, lo:hi])
+            x = torch.cat(pieces, -1)[..., :length]
         return x + y if self.skip else x
     def _forward_torch(self, x):
         y, framed = x, False
