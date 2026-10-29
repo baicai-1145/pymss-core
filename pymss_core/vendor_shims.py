@@ -444,13 +444,10 @@ def install_conv1d_shim() -> bool:
 
     def conv1d(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1):
         device = getattr(input, "device", None)
-        if device is not None and device.type == "supa" and bias is not None and bias.dtype != input.dtype:
-            bias = bias.to(input.dtype)
-        if (device is not None and device.type == "supa"
-                and input.dtype != weight.dtype
-                and input.dtype == torch.bfloat16
-                and weight.dtype == torch.float32):
-            weight = weight.to(torch.bfloat16)
+        if device is not None and device.type == "supa" and weight.dtype != input.dtype:
+            weight = weight.to(input.dtype)
+            if bias is not None and bias.dtype != input.dtype:
+                bias = bias.to(input.dtype)
         in_channels = input.shape[1] if input.dim() > 1 else 0
         grouped = 1 < groups < in_channels
         if not grouped or device is None or device.type in ("cpu", "meta"):
@@ -713,8 +710,12 @@ def install_sdpa_shim() -> bool:
             return original(query, key, value, attn_mask=attn_mask, dropout_p=dropout_p,
                             is_causal=is_causal, scale=scale, enable_gqa=enable_gqa)
         if backend == "sudnn" and query.device.type == "supa":
-            if attn_mask is not None or is_causal or dropout_p != 0.0 or enable_gqa:
-                raise NotImplementedError("Biren suDNN backend supports unmasked inference self-attention")
+            if (attn_mask is not None or is_causal or dropout_p != 0.0 or enable_gqa
+                    or query.dtype != torch.bfloat16
+                    or key.dtype != query.dtype or value.dtype != query.dtype
+                    or query.ndim < 3 or query.shape != key.shape or query.shape != value.shape):
+                return sdpa_equivalent(query, key, value, attn_mask, is_causal,
+                                       scale=scale, enable_gqa=enable_gqa)
             return sudnn_sdpa(query, key, value, scale=scale)
         return sdpa_equivalent(query, key, value, attn_mask, dropout_p, is_causal,
                                scale=scale, enable_gqa=enable_gqa)
