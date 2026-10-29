@@ -1200,6 +1200,28 @@ def install_matmul_guard_shim() -> bool:
     return True
 
 
+def install_layernorm_module_shim() -> bool:
+    """Restore reference ``nn.LayerNorm.forward`` on vendor stacks.
+
+    torch_br replaces ``nn.LayerNorm.forward`` at class level with an op that
+    needs ``LayerNormInfer`` (missing for some shapes/dtypes). Pointing the
+    module back at ``F.layer_norm`` routes through the shimmed functional
+    (vendor try -> CPU fallback).
+    """
+    if "layernorm_module" in _installed:
+        return False
+    import torch.nn as nn
+    import torch.nn.functional as F
+
+    def forward(self, input):
+        return F.layer_norm(input, self.normalized_shape, self.weight, self.bias, self.eps)
+
+    forward._vendor_shim = True
+    nn.LayerNorm.forward = forward
+    _installed.add("layernorm_module")
+    return True
+
+
 def install_layer_norm_shim() -> bool:
     """CPU fallback for ``F.layer_norm`` when the vendor lacks the kernel.
 
@@ -1349,6 +1371,7 @@ SHIMS = {
     "embedding": install_embedding_shim,
     "matmul_guard": install_matmul_guard_shim,
     "layer_norm": install_layer_norm_shim,
+    "layernorm_module": install_layernorm_module_shim,
 }
 
 
@@ -1393,7 +1416,7 @@ def install_vendor_shims(
     """
     if device_type in ("cpu", "meta"):
         return []
-    wanted = ["fold", "complex_view", "linear_dtype", "embedding", "matmul_guard", "layer_norm"]
+    wanted = ["fold", "complex_view", "linear_dtype", "embedding", "matmul_guard", "layer_norm", "layernorm_module"]
     if not complex_mul:
         wanted.append("complex_mul")
     if not complex_reshape:

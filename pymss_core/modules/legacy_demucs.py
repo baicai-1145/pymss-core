@@ -126,6 +126,13 @@ class LegacyLocalState(nn.Module):
         if ndecay: self.query_decay = nn.Conv1d(channels, heads * ndecay, 1); self.query_decay.weight.data *= 0.01; self.query_decay.bias.data[:] = -2
         self.proj = nn.Conv1d(channels + heads * nfreqs, channels, 1)
     def forward(self, x):
+        if x.device.type == "supa":
+            # in-place masked_fill_/einsum combos hit "_copy_from_and_resize"
+            # on the vendor stack; the legacy attention is tiny -- CPU roundtrip
+            device = x.device
+            return self._forward_reference(x.cpu()).to(device)
+        return self._forward_reference(x)
+    def _forward_reference(self, x):
         batch, _, time = x.shape
         heads = self.heads
         indexes = torch.arange(time, device=x.device, dtype=x.dtype)
