@@ -80,8 +80,9 @@ def cached_rotary_cos_sin(rotary_embed, seq_len, device, dtype):
     if cache is None: rotary_embed._pymss_cos_sin_cache = cache = {}
     key = (seq_len, device.type, device.index, dtype)
     if (cached := cache.get(key)) is not None: return cached
-    freqs = rotary_embed.forward(lambda: rotary_embed.get_seq_pos(seq_len, device=device, dtype=dtype, offset=0), cache_key=f"freqs:{seq_len}|offset:0")[None, :, None, :].to(device=device, dtype=dtype)
-    cache[key] = cached = (freqs[..., ::2].cos(), freqs[..., ::2].sin())
+    phase_dtype = torch.float32 if dtype in (torch.float16, torch.bfloat16) else dtype
+    freqs = rotary_embed.forward(lambda: rotary_embed.get_seq_pos(seq_len, device=device, dtype=phase_dtype, offset=0), cache_key=f"freqs:{seq_len}|offset:0")[None, :, None, :].to(device=device, dtype=phase_dtype)
+    cache[key] = cached = (freqs[..., ::2].cos().to(dtype=dtype), freqs[..., ::2].sin().to(dtype=dtype))
     return cached
 def rotate_qk_fast_bnhd(rotary_embed, q, k): cos, sin = cached_rotary_cos_sin(rotary_embed, q.shape[1], q.device, q.dtype); return apply_rotary_emb_fast(cos, sin, q), apply_rotary_emb_fast(cos, sin, k)
 def qkv_to_bnhd(qkv, heads): b, n, _ = qkv.shape; return qkv.view(b, n, 3, heads, -1).unbind(dim=2)
