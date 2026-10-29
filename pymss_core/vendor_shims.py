@@ -444,15 +444,32 @@ def install_conv1d_shim() -> bool:
 
     def conv1d(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1):
         device = getattr(input, "device", None)
-        if device is not None and device.type == "supa" and weight.dtype != input.dtype:
-            weight = weight.to(input.dtype)
-            if bias is not None and bias.dtype != input.dtype:
-                bias = bias.to(input.dtype)
-        in_channels = input.shape[1] if input.dim() > 1 else 0
-        grouped = 1 < groups < in_channels
-        if not grouped or device is None or device.type in ("cpu", "meta"):
+        if device is None or device.type != "supa":
             return original(input, weight, bias, stride, padding, dilation, groups)
-        return conv1d_grouped_equivalent(input, weight, bias, stride, padding, dilation, groups)
+
+        def dispatch(tensor, w, b):
+            in_channels = tensor.shape[1] if tensor.dim() > 1 else 0
+            if 1 < groups < in_channels:
+                return conv1d_grouped_equivalent(tensor, w, b, stride, padding, dilation, groups)
+            return original(tensor, w, b, stride, padding, dilation, groups)
+
+        if weight.dtype != input.dtype:
+            weight = weight.to(input.dtype)
+        if bias is not None and bias.dtype != input.dtype:
+            bias = bias.to(input.dtype)
+        try:
+            return dispatch(input, weight, bias)
+        except RuntimeError as error:
+            message = str(error).lower()
+            if "schema" not in message and "data type" not in message:
+                raise
+        # some SUBLAS conv configs are fp32-only: retry unified fp32, then CPU
+        try:
+            return dispatch(input.float(), weight.float(), bias.float() if bias is not None else None)
+        except RuntimeError:
+            return original(input.cpu(), weight.cpu(),
+                            bias.cpu() if bias is not None else None,
+                            stride, padding, dilation, groups).to(input.device)
 
     conv1d._vendor_shim = True
     F.conv1d = conv1d
