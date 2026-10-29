@@ -615,9 +615,11 @@ def sdpa_equivalent(
     flat_v = value.reshape(-1, length, dim).contiguous()
     # SUDNN refuses to compile the GE kernel for some folded batches (1384, 1385 and
     # 2048 all fail while 173/346/692/1024 succeed), and a production roformer folds
-    # to 862 frames x 8 heads.  Walking the batch in blocks of 256 keeps every bmm on
-    # a prebuilt kernel; the default can be overridden, and 0 disables the split.
-    chunk = int(os.environ.get("PYMSS_SDPA_BATCH_CHUNK", "256"))
+    # 53444 rows.  Blocks of 1024 keep every bmm on a prebuilt kernel while issuing
+    # 52 calls instead of the 209 that a block of 256 needs, which measured 3820 ms
+    # against 4935 ms for the whole model.  0 disables the split and 512/256 are the
+    # fallbacks if a particular model lands on a batch that cannot be planned.
+    chunk = int(os.environ.get("PYMSS_SDPA_BATCH_CHUNK", "1024"))
     if chunk and flat_q.shape[0] > chunk:
         # Inside a whole model the vendor refuses even batches that a standalone
         # bmm handles, so the batch can be walked in slices.
