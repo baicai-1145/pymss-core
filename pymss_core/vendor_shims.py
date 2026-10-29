@@ -677,11 +677,38 @@ def install_sdpa_shim() -> bool:
 
     original = functional.scaled_dot_product_attention
 
+    vendor_chunk = int(os.environ.get("PYMSS_SDPA_VENDOR_CHUNK", "0"))
+    vendor_broken = set()
+
     def scaled_dot_product_attention(query, key, value, attn_mask=None, dropout_p=0.0,
                                      is_causal=False, *, scale=None, enable_gqa=False):
         if query.device.type in ("cpu", "meta") or query.is_cuda:
             return original(query, key, value, attn_mask=attn_mask, dropout_p=dropout_p,
                             is_causal=is_causal, scale=scale, enable_gqa=enable_gqa)
+        # The vendor's fused kernel handles the folded 3-D shape in a fresh process at
+        # 16.2 ms where the explicit matmuls need 47.4 ms, and chunking the batch keeps
+        # it off the plan sizes that fail.  Opt-in, because inside a whole model the
+        # planner sometimes refuses a shape it accepts on its own.
+        if vendor_chunk and not (attn_mask is not None or is_causal or dropout_p > 0.0):
+            lead = query.shape[:-2]
+            length, dim = query.shape[-2], query.shape[-1]
+            key_id = (tuple(lead), length, dim, str(query.dtype))
+            if key_id not in vendor_broken:
+                try:
+                    flat_q = query.reshape(-1, length, dim).contiguous()
+                    flat_k = key.reshape(-1, length, dim).contiguous()
+                    flat_v = value.reshape(-1, length, dim).contiguous()
+                    parts = []
+                    for start in range(0, flat_q.shape[0], vendor_chunk):
+                        stop = min(start + vendor_chunk, flat_q.shape[0])
+                        parts.append(original(flat_q[start:stop], flat_k[start:stop],
+                                              flat_v[start:stop], scale=scale))
+                    out = parts[0] if len(parts) == 1 else torch.cat(parts, dim=0)
+                    return out.reshape(*lead, length, dim)
+                except Exception:
+                    # Remember the shape so a model pays the planning cost once, then
+                    # falls back for the rest of the run.
+                    vendor_broken.add(key_id)
         return sdpa_equivalent(query, key, value, attn_mask, dropout_p, is_causal,
                                scale=scale, enable_gqa=enable_gqa)
 
