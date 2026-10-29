@@ -1158,10 +1158,14 @@ def install_fft_dtype_shim() -> bool:
         def make_guarded(op, orig):
             def guarded(input, *args, **kwargs):
                 device = getattr(input, "device", None)
-                if (device is not None and device.type not in ("cpu", "meta")
-                        and input.dtype in (torch.float16, torch.bfloat16)):
-                    out = orig(input.float(), *args, **kwargs)
-                    return out.to(input.dtype) if out.is_floating_point() else out
+                if device is not None and device.type not in ("cpu", "meta"):
+                    if input.dtype in (torch.float16, torch.bfloat16):
+                        out = orig(input.float(), *args, **kwargs)
+                        return out.to(input.dtype) if out.is_floating_point() else out
+                    if input.is_complex() and input.dtype == torch.complex32:
+                        promoted = torch.view_as_complex(torch.view_as_real(input).float())
+                        out = orig(promoted, *args, **kwargs)
+                        return out.half() if out.is_floating_point() else out
                 return orig(input, *args, **kwargs)
             guarded._vendor_shim = True
             guarded._pymss_original = orig
@@ -1170,19 +1174,37 @@ def install_fft_dtype_shim() -> bool:
         wrapped[name] = make_guarded(name, original)
         setattr(torch.fft, name, wrapped[name])
 
-    # torch.stft lowers into the same hipFFT plan; promote its input too
+    # torch.stft/istft lower into the same hipFFT plans; promote their operands
     original_stft = torch.stft
+    original_istft = torch.istft
+
+    def _promote(tensor):
+        """Return an fp32/complex64 operand for half/complex32 inputs."""
+        if tensor.dtype in (torch.float16, torch.bfloat16):
+            return tensor.float(), tensor.dtype
+        if tensor.is_complex() and tensor.dtype == torch.complex32:
+            return torch.view_as_complex(torch.view_as_real(tensor).float()), torch.complex32
+        return tensor, None
 
     def stft(input, *args, **kwargs):
-        device = getattr(input, "device", None)
-        if (device is not None and device.type not in ("cpu", "meta")
-                and input.dtype in (torch.float16, torch.bfloat16)):
-            return original_stft(input.float(), *args, **kwargs)
+        promoted, kind = _promote(input)
+        if kind is not None and input.device.type not in ("cpu", "meta"):
+            return original_stft(promoted, *args, **kwargs)
         return original_stft(input, *args, **kwargs)
+
+    def istft(input, *args, **kwargs):
+        promoted, kind = _promote(input)
+        if kind is not None and input.device.type not in ("cpu", "meta"):
+            out = original_istft(promoted, *args, **kwargs)
+            return out.to(input.dtype if kind is torch.complex32 else kind) if out.is_floating_point() else out
+        return original_istft(input, *args, **kwargs)
 
     stft._vendor_shim = True
     stft._pymss_original = original_stft
+    istft._vendor_shim = True
+    istft._pymss_original = original_istft
     torch.stft = stft
+    torch.istft = istft
     _installed.add("fft_dtype")
     return True
 
