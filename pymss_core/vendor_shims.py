@@ -1138,6 +1138,55 @@ def install_std_shim() -> bool:
 
 
 #: Shim name -> installer.
+def install_fft_dtype_shim() -> bool:
+    """Upcast half inputs before ``torch.fft``/``stft`` on hipFFT stacks.
+
+    DTK/hipFFT rejects half-precision transforms outright ("hipFFT doesn't
+    support transforms of type: Half", scnet/mdx23c on Z100L). The transform
+    itself is supported in fp32, so promote the operand, run the vendor FFT,
+    and cast real outputs back.
+    """
+    if "fft_dtype" in _installed:
+        return False
+
+    wrapped = {}
+    for name in ("rfft", "irfft", "fft", "ifft", "hfft", "ihfft"):
+        original = getattr(torch.fft, name, None)
+        if original is None:
+            continue
+
+        def make_guarded(op, orig):
+            def guarded(input, *args, **kwargs):
+                device = getattr(input, "device", None)
+                if (device is not None and device.type not in ("cpu", "meta")
+                        and input.dtype in (torch.float16, torch.bfloat16)):
+                    out = orig(input.float(), *args, **kwargs)
+                    return out.to(input.dtype) if out.is_floating_point() else out
+                return orig(input, *args, **kwargs)
+            guarded._vendor_shim = True
+            guarded._pymss_original = orig
+            return guarded
+
+        wrapped[name] = make_guarded(name, original)
+        setattr(torch.fft, name, wrapped[name])
+
+    # torch.stft lowers into the same hipFFT plan; promote its input too
+    original_stft = torch.stft
+
+    def stft(input, *args, **kwargs):
+        device = getattr(input, "device", None)
+        if (device is not None and device.type not in ("cpu", "meta")
+                and input.dtype in (torch.float16, torch.bfloat16)):
+            return original_stft(input.float(), *args, **kwargs)
+        return original_stft(input, *args, **kwargs)
+
+    stft._vendor_shim = True
+    stft._pymss_original = original_stft
+    torch.stft = stft
+    _installed.add("fft_dtype")
+    return True
+
+
 def install_embedding_shim() -> bool:
     """Gather-based ``F.embedding`` for vendor devices without the op.
 
@@ -1405,6 +1454,7 @@ SHIMS = {
     "conv1d": install_conv1d_shim,
     "complex_cat": install_complex_cat_shim,
     "fft": install_fft_shim,
+    "fft_dtype": install_fft_dtype_shim,
     "std": install_std_shim,
     "cpu": install_cpu_shim,
     "sdpa": install_sdpa_shim,
@@ -1432,6 +1482,7 @@ def install_vendor_shims(
     conv1d: bool = False,
     complex_cat: bool = False,
     fft: bool = False,
+    fft_dtype: bool = False,
     std: bool = False,
     cpu: bool = False,
     sdpa: bool = False,
@@ -1480,6 +1531,8 @@ def install_vendor_shims(
         wanted.append("complex_cat")
     if fft:
         wanted.append("fft")
+    if fft_dtype:
+        wanted.append("fft_dtype")
     if std:
         wanted.append("std")
     if cpu:

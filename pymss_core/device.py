@@ -127,6 +127,7 @@ class DeviceProfile:
     grouped_conv1d: bool = False
     complex_cat: bool = False
     fft_shim: bool = False
+    fft_dtype_shim: bool = False
     std_shim: bool = False
     cpu_shim: bool = False
     sdpa_shim: bool = False
@@ -169,7 +170,7 @@ class DeviceProfile:
 _PROFILES: dict[str, DeviceProfile] = {
     NVIDIA: DeviceProfile(NVIDIA, "cuda"),
     ROCM: DeviceProfile(ROCM, "cuda"),
-    HYGON: DeviceProfile(HYGON, "cuda"),
+    HYGON: DeviceProfile(HYGON, "cuda", fft_dtype_shim=True),
     ILUVATAR: DeviceProfile(ILUVATAR, "cuda"),
     METAX: DeviceProfile(METAX, "cuda"),
     ENFLAME: DeviceProfile(ENFLAME, "gcu", plugin="torch_gcu"),
@@ -502,6 +503,7 @@ def prepare_device_alias(alias: str) -> str:
         conv1d=profile_now.grouped_conv1d,
         complex_cat=profile_now.complex_cat,
         fft=profile_now.fft_shim,
+        fft_dtype=profile_now.fft_dtype_shim,
         std=profile_now.std_shim,
         cpu=profile_now.cpu_shim,
         sdpa=profile_now.sdpa_shim,

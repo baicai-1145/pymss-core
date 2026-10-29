@@ -126,11 +126,23 @@ class BLSTM(nn.Module):
         if self.max_steps is not None and x.shape[-1] > self.max_steps:
             batch, channels, length = x.shape
             width, stride = self.max_steps, self.max_steps // 2
+            covered = width + stride * -(-(length - width) // stride)  # ceil
+            if covered > length:
+                x = torch.nn.functional.pad(x, (0, covered - length))
             frames = x.unfold(-1, width, stride)
             nframes, framed = frames.shape[2], True
-            x = frames.permute(0, 2, 1, 3).reshape(-1, channels, width)
-        x = self.linear(self.lstm(x.permute(2, 0, 1))[0]).permute(1, 2, 0)
-        if framed: frames = x.reshape(batch, -1, channels, width); limit = stride // 2; x = torch.cat([frames[:, i, :, limit if i else 0:-limit if i < nframes - 1 or not i else None] for i in range(nframes)], -1)[..., :length]
+            flat = frames.permute(0, 2, 1, 3).reshape(-1, channels, width)
+            x = self.linear(self.lstm(flat.permute(2, 0, 1))[0]).permute(1, 2, 0)
+        else:
+            x = self.linear(self.lstm(x.permute(2, 0, 1))[0]).permute(1, 2, 0)
+        if framed:
+            stacked = x.reshape(batch, -1, channels, width); limit = stride // 2
+            pieces = []
+            for i in range(nframes):
+                lo = limit if i else 0
+                hi = width if not (i < nframes - 1 or not i) else width - limit
+                pieces.append(stacked[:, i, :, lo:hi])
+            x = torch.cat(pieces, -1)[..., :length]
         return x + y if self.skip else x
 class LegacyLayerScale(nn.Module):
     def __init__(self, channels, init=0): super().__init__(); self.scale = nn.Parameter(torch.zeros(channels, requires_grad=True)); self.scale.data[:] = init
