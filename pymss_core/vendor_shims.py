@@ -930,13 +930,13 @@ def _ffn_fast_path_ok(module) -> bool:
     net = module.net
     if len(net) != 6:
         return False
-    # Sequential(RMSNorm, Linear, GELU, Dropout, Linear, Dropout)
+    # Sequential(RMSNorm, Linear, GELU, Dropout, Linear, Dropout); dropout p is
+    # irrelevant in eval mode (the caller gates on not self.training)
     return (isinstance(net[0], RMSNorm)
             and isinstance(net[1], nn.Linear) and isinstance(net[4], nn.Linear)
             and isinstance(net[2], nn.GELU)
             and isinstance(net[3], nn.Dropout) and isinstance(net[5], nn.Dropout)
-            and net[1].bias is not None and net[4].bias is not None
-            and float(net[3].p) == 0.0 and float(net[5].p) == 0.0)
+            and net[1].bias is not None and net[4].bias is not None)
 
 
 def _vendor_fused_ffn(module, normalized):
@@ -1101,6 +1101,34 @@ def install_std_shim() -> bool:
 
 
 #: Shim name -> installer.
+def install_linear_dtype_shim() -> bool:
+    """Align ``F.linear`` dtypes on vendor devices.
+
+    Mixed bf16-activation x fp32-weight calls (models loaded without a uniform
+    cast) are rejected outright by the SUBLAS GEMM; align weight and bias to
+    the activation dtype before dispatch.
+    """
+    if "linear_dtype" in _installed:
+        return False
+    import torch.nn.functional as F
+
+    original = F.linear
+
+    def linear(input, weight, bias=None, *args, **kwargs):
+        device = getattr(input, "device", None)
+        if device is not None and device.type == "supa" and weight.dtype != input.dtype:
+            weight = weight.to(input.dtype)
+            if bias is not None and bias.dtype != input.dtype:
+                bias = bias.to(input.dtype)
+        return original(input, weight, bias, *args, **kwargs)
+
+    linear._vendor_shim = True
+    linear._pymss_original = original
+    F.linear = linear
+    _installed.add("linear_dtype")
+    return True
+
+
 def install_fold_shim() -> bool:
     """Run ``F.fold``/``F.col2im`` on CPU for vendor devices.
 
@@ -1167,6 +1195,7 @@ SHIMS = {
     "rope": install_rope_shim,
     "fold": install_fold_shim,
     "complex_view": install_complex_view_shim,
+    "linear_dtype": install_linear_dtype_shim,
 }
 
 
@@ -1211,7 +1240,7 @@ def install_vendor_shims(
     """
     if device_type in ("cpu", "meta"):
         return []
-    wanted = ["fold", "complex_view"]
+    wanted = ["fold", "complex_view", "linear_dtype"]
     if not complex_mul:
         wanted.append("complex_mul")
     if not complex_reshape:

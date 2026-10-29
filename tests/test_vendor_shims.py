@@ -51,7 +51,7 @@ class TestShimInstallation:
         )
         assert set(installed) == {
             "complex_mul", "window", "glu", "complex_reshape", "group_norm", "interpolate",
-            "fold", "complex_view",
+            "fold", "complex_view", "linear_dtype",
         }
         assert install_vendor_shims("supa", complex_mul=False, window_on_device=False, glu=True) == []
         reset_shims()

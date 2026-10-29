@@ -218,7 +218,7 @@ def test_feedforward_structure_gate_rejects_variants():
     module2.net[1].bias = None          # bias-free projection
     assert not vendor_shims._ffn_fast_path_ok(module2)
     module3 = FeedForward(dim=32, mult=4, dropout=0.1)
-    assert not vendor_shims._ffn_fast_path_ok(module3)   # active dropout
+    assert vendor_shims._ffn_fast_path_ok(module3)   # dropout p irrelevant in eval (caller gates training)
 
 
 def test_vendor_rope_rotate_bhqd_matches_reference(monkeypatch):
