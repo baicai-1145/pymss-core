@@ -430,3 +430,26 @@ class TestSdpaChunking:
         monkeypatch.setenv("PYMSS_SDPA_BATCH_CHUNK", "3")
         piecewise = sdpa_equivalent(q, k, v, is_causal=True)
         assert torch.allclose(whole, piecewise, atol=1e-6)
+
+
+class TestSdpaTransposedKey:
+    """A strided k^T runs the GEMM at a third of the speed, so it is materialised."""
+
+    def test_unit_scale_path_works(self, monkeypatch):
+        from pymss_core.vendor_shims import sdpa_equivalent
+
+        torch.manual_seed(0)
+        q, k, v = (torch.randn(2, 3, 4, 8) for _ in range(3))
+        want = torch.nn.functional.scaled_dot_product_attention(q, k, v, scale=1.0)
+        assert torch.allclose(sdpa_equivalent(q, k, v, scale=1.0), want, atol=1e-5)
+
+    def test_chunked_matches_unchunked_with_contiguous_key(self, monkeypatch):
+        from pymss_core.vendor_shims import sdpa_equivalent
+
+        torch.manual_seed(0)
+        q, k, v = (torch.randn(6, 3, 4, 8) for _ in range(3))
+        monkeypatch.setenv("PYMSS_SDPA_BATCH_CHUNK", "0")
+        whole = sdpa_equivalent(q, k, v)
+        monkeypatch.setenv("PYMSS_SDPA_BATCH_CHUNK", "4")
+        piecewise = sdpa_equivalent(q, k, v)
+        assert torch.allclose(whole, piecewise, atol=1e-6)

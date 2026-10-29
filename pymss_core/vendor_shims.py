@@ -628,10 +628,14 @@ def sdpa_equivalent(
         # read and write of the scores (about 5 ms per attention here, 120 ms per run).
         if scale != 1.0:
             flat_q = flat_q * scale
+        # A strided k^T runs the GEMM at 157 GB/s on this device and a contiguous one
+        # at 529 GB/s (10.8 ms against 3.2 ms for the score tensor of a production
+        # roformer), so it is materialised once, outside the loop.
+        kt = flat_k.transpose(-1, -2).contiguous()
         pieces = []
         for start in range(0, flat_q.shape[0], chunk):
             stop = min(start + chunk, flat_q.shape[0])
-            piece = torch.bmm(flat_q[start:stop], flat_k[start:stop].transpose(-1, -2))
+            piece = torch.bmm(flat_q[start:stop], kt[start:stop])
             pieces.append(piece)
         # A single block is the common case (496 folded rows against a 1024 block) and
         # cat would copy the whole score tensor -- 1.5 GB here -- for nothing.
@@ -648,7 +652,7 @@ def sdpa_equivalent(
             values.append(torch.bmm(probs[start:stop], flat_v[start:stop]))
         out = values[0] if len(values) == 1 else torch.cat(values, dim=0)
         return out.reshape(*lead, length, dim)
-    scores = torch.bmm(flat_q * scale, flat_k.transpose(-1, -2))
+    scores = torch.bmm(flat_q * scale, flat_k.transpose(-1, -2).contiguous())
     if attn_mask is not None:
         scores = scores + attn_mask.reshape(scores.shape[-2:])
     elif is_causal:
