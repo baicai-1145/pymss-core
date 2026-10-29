@@ -443,8 +443,15 @@ def install_conv1d_shim() -> bool:
     original = F.conv1d
 
     def conv1d(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1):
-        in_channels = input.shape[1] if input.dim() > 1 else 0
         device = getattr(input, "device", None)
+        if device is not None and device.type == "supa" and bias is not None and bias.dtype != input.dtype:
+            bias = bias.to(input.dtype)
+        if (device is not None and device.type == "supa"
+                and input.dtype != weight.dtype
+                and input.dtype == torch.bfloat16
+                and weight.dtype == torch.float32):
+            weight = weight.to(torch.bfloat16)
+        in_channels = input.shape[1] if input.dim() > 1 else 0
         grouped = 1 < groups < in_channels
         if not grouped or device is None or device.type in ("cpu", "meta"):
             return original(input, weight, bias, stride, padding, dilation, groups)
@@ -1075,6 +1082,56 @@ def install_std_shim() -> bool:
 
 
 #: Shim name -> installer.
+def install_fold_shim() -> bool:
+    """Run ``F.fold``/``F.col2im`` on CPU for vendor devices.
+
+    The SUDNN backend rejects these overlap-add ops (ErrorCode 11); the CPU
+    roundtrip costs one transfer of each way and keeps band-split overlap-add
+    models (mdx23c/apollo/bandit) functional.
+    """
+    if "fold" in _installed:
+        return False
+    import torch.nn.functional as F
+
+    def _cpu_variant(original):
+        def wrapper(tensor, *args, **kwargs):
+            if getattr(tensor, "device", None) is not None and tensor.device.type == "supa":
+                return original(tensor.cpu(), *args, **kwargs).to(tensor.device)
+            return original(tensor, *args, **kwargs)
+        wrapper._vendor_shim = True
+        wrapper._pymss_original = original
+        return wrapper
+
+    F.fold = _cpu_variant(F.fold)
+    if hasattr(F, "col2im"):
+        F.col2im = _cpu_variant(F.col2im)
+    _installed.add("fold")
+    return True
+
+
+def install_complex_view_shim() -> bool:
+    """Upcast bf16 before ``torch.view_as_complex`` on vendor devices.
+
+    SUPA supports view_as_complex only for fp16/fp32/fp64; bandit-family mask
+    heads build complex masks from bf16 planes, so promote to fp32
+    (complex64) first.  Downstream complex ops already run through shims.
+    """
+    if "complex_view" in _installed:
+        return False
+    original = torch.view_as_complex
+
+    def view_as_complex(tensor):
+        if tensor.dtype == torch.bfloat16 and tensor.device.type == "supa":
+            return original(tensor.float())
+        return original(tensor)
+
+    view_as_complex._vendor_shim = True
+    view_as_complex._pymss_original = original
+    torch.view_as_complex = view_as_complex
+    _installed.add("complex_view")
+    return True
+
+
 SHIMS = {
     "complex_mul": install_complex_mul_shim,
     "complex_reshape": install_complex_reshape_shim,
@@ -1088,7 +1145,9 @@ SHIMS = {
     "std": install_std_shim,
     "cpu": install_cpu_shim,
     "sdpa": install_sdpa_shim,
-"rope": install_rope_shim,
+    "rope": install_rope_shim,
+    "fold": install_fold_shim,
+    "complex_view": install_complex_view_shim,
 }
 
 
@@ -1133,7 +1192,7 @@ def install_vendor_shims(
     """
     if device_type in ("cpu", "meta"):
         return []
-    wanted = []
+    wanted = ["fold", "complex_view"]
     if not complex_mul:
         wanted.append("complex_mul")
     if not complex_reshape:
