@@ -168,15 +168,24 @@ class TestExactDftFallback:
         assert back.shape == x.shape
         assert torch.allclose(back, x, atol=2e-3)
 
-    def test_the_vendor_kernel_is_off_by_default(self):
-        # Measured at n=2048 with 862 frames: vendor 494 ms, radix-2 495 ms, DFT
-        # matrix 41 ms.  The matrix is a large GEMM, which is what this card is
-        # fast at, so no size is trusted by default.
-        assert vendor_fft_trusted(2048) is False
-        assert vendor_fft_trusted(4096) is False
+    def test_power_of_two_sizes_use_the_vendor_kernel(self):
+        # A clean container measures 39 ms for n=2048 with 862 frames against 60 ms
+        # for the DFT matrix, so the vendor kernel is the fast path; non-power-of-two
+        # sizes have no plan at all.
+        assert vendor_fft_trusted(2048) is True
+        assert vendor_fft_trusted(4096) is True
+        assert vendor_fft_trusted(1024) is True
+        assert vendor_fft_trusted(16) is True
         assert vendor_fft_trusted(1411) is False
-        assert vendor_fft_trusted(1024) is False
-        assert vendor_fft_trusted(16) is False
+
+    def test_a_size_that_misbehaved_is_remembered(self):
+        from pymss_core import npu_fft
+
+        npu_fft._VENDOR_FFT_BAD.add(4096)
+        try:
+            assert vendor_fft_trusted(4096) is False
+        finally:
+            npu_fft._VENDOR_FFT_BAD.discard(4096)
 
     def test_env_override_can_widen_the_allowlist(self, monkeypatch):
         monkeypatch.setenv("PYMSS_VENDOR_FFT_SIZES", "1024,2048")

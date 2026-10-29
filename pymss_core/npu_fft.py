@@ -48,6 +48,10 @@ def hann_window_npu(window_length: int, *, device, dtype=torch.float32, periodic
 #: every smaller size has been caught returning silent zeros.
 _VENDOR_FFT_ALLOWED = frozenset()
 
+#: Sizes where the vendor kernel returned wrong values or raised; remembered so the
+#: exact path is used without re-testing every call.
+_VENDOR_FFT_BAD: set[int] = set()
+
 _DFT_CACHE: dict[tuple[int, str, torch.dtype], tuple[torch.Tensor, torch.Tensor]] = {}
 
 
@@ -93,14 +97,21 @@ def vendor_fft_trusted(n: int, device=None) -> bool:
     Returns:
         ``True`` when the vendor kernel is trusted for this size.
     """
-    # Measured on BIREN (n_fft=2048, 862 frames, 10 s of audio at 44.1 kHz):
-    # vendor torch.fft.rfft 494 ms, radix-2 495 ms, DFT matrix 41 ms.  The matrix is
-    # one large GEMM and this card is only fast on large GEMMs, so it wins by an
-    # order of magnitude and the vendor kernel is no longer used by default.
-    allowed = os.environ.get("PYMSS_VENDOR_FFT_SIZES", "")
-    sizes = {int(part) for part in allowed.split(",") if part.strip()} if allowed else _VENDOR_FFT_ALLOWED
-    if n not in sizes or (n & (n - 1)) != 0:
+    # A clean container measures the vendor kernel at 39 ms for n=2048 with 862
+    # frames, against 60 ms for the DFT matrix, so the vendor path is the fast one.
+    # It is only refused when the environment says so, when a size has already
+    # misbehaved here (silent zeros, a failed plan), or when it is not a power of
+    # two.  A degraded container makes the same call 10x slower and eventually
+    # raises, which is why the measurements must be taken in a fresh session.
+    if (n & (n - 1)) != 0 or n in _VENDOR_FFT_BAD:
         return False
+    allowed = os.environ.get("PYMSS_VENDOR_FFT_SIZES", "")
+    if allowed:
+        sizes = {int(part) for part in allowed.split(",") if part.strip()}
+        return n in sizes
+    if _VENDOR_FFT_ALLOWED:
+        return n in _VENDOR_FFT_ALLOWED
+    return True
     if device is None:
         return True
     key = (n, str(device))
@@ -157,7 +168,7 @@ _MATMUL_FFT_BROKEN = set()
 
 
 def _rfft_matmul(x: torch.Tensor, n: int) -> torch.Tensor:
-    """``rfft`` exactly, by DFT matrix; radix-2 when the matrix route fails."""
+    """``rfft`` exactly: DFT matrix for sizes up to 8192, radix-2 above."""
     if n <= 8192 and instance_key(x) not in _MATMUL_FFT_BROKEN:
         try:
             return _rfft_matmul_dft(x, n)
@@ -411,8 +422,13 @@ def stft_npu(
     # torch.stft(normalized=True) scales the plain FFT output by sqrt(1/n_fft).
     frames_flat = frames.squeeze(1)
     if vendor_fft_trusted(n_fft, frames_flat.device):
-        spec = torch.fft.rfft(frames_flat, dim=-1)  # (N, T, F)
-        if _degenerate(spec, frames_flat):
+        try:
+            spec = torch.fft.rfft(frames_flat, dim=-1)  # (N, T, F)
+        except Exception:
+            _VENDOR_FFT_BAD.add(n_fft)
+            spec = None
+        if spec is None or _degenerate(spec, frames_flat):
+            _VENDOR_FFT_BAD.add(n_fft)
             spec = _rfft_matmul(frames_flat, n_fft)
     else:
         spec = _rfft_matmul(frames_flat, n_fft)
@@ -461,8 +477,13 @@ def istft_npu(
     # torch_npu runs complex64 transposes on the AI_CPU; permute real/imag planes instead.
     flat_spec = torch.view_as_complex(torch.view_as_real(flat_spec).permute(0, 2, 1, 3).contiguous())  # (N, T, F)
     if vendor_fft_trusted(n_fft, flat_spec.device):
-        frames = torch.fft.irfft(flat_spec, n=n_fft, dim=-1)  # (N, T, n_fft)
-        if _degenerate(frames, flat_spec):
+        try:
+            frames = torch.fft.irfft(flat_spec, n=n_fft, dim=-1)  # (N, T, n_fft)
+        except Exception:
+            _VENDOR_FFT_BAD.add(n_fft)
+            frames = None
+        if frames is None or _degenerate(frames, flat_spec):
+            _VENDOR_FFT_BAD.add(n_fft)
             frames = _irfft_matmul(flat_spec, n_fft)
     else:
         frames = _irfft_matmul(flat_spec, n_fft)
