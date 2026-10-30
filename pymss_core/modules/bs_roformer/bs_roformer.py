@@ -1,3 +1,4 @@
+from __future__ import annotations
 from torch.nn import Module
 from .common import (DEFAULT_FREQS_PER_BANDS, MaskEstimator, RMSNorm, RoformerRuntimeMixin, forward_bandsplit_roformer, forward_roformer_mask_core, ignore_roformer_training_kwargs, init_conformer_layers, init_roformer_band_modules, init_roformer_layers, init_roformer_runtime, init_roformer_shared_bias, init_roformer_stft, roformer_freqs_per_bands_with_complex, roformer_stft_freq_bins, roformer_transformer_kwargs)
 class BSRoformer(RoformerRuntimeMixin, Module):

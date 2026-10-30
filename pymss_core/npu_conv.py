@@ -39,6 +39,7 @@ through CPU keeps inference usable.  Inference only: a call with autograd
 enabled raises instead of silently detaching.
 """
 from __future__ import annotations
+from __future__ import annotations
 
 import torch
 import torch.nn.functional as F

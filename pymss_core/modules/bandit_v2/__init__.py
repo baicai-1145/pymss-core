@@ -1,3 +1,4 @@
+from __future__ import annotations
 from ..bandit.bandsplit import SequentialNormFC as NormFC
 from ..bandit.bandsplit import _ConfiguredBandSplitModule
 from ..bandit.core.model.bsrnn.utils import (BandsplitSpecification, BassBandsplitSpecification, DrumBandsplitSpecification, MelBandsplitSpecification, MusicalBandsplitSpecification, OtherBandsplitSpecification, PerceptualBandsplitSpecification, VocalBandsplitSpecification, band_widths_from_specs, check_no_gap, check_no_overlap, check_nonzero_bandwidth, mel_filterbank, musical_filterbank)

@@ -1,3 +1,4 @@
+from __future__ import annotations
 import torch
 from .mdx23c_tfc_tdf_v3 import TFC_TDF, Downscale, Upscale
 from .mlx_backend import (batch_norm, check_dtype, conv2d, generic_activation, generic_module_forward, group_norm, instance_norm2d, istft, linear_layer, mx_dtype, periodic_hann_window, reflect_pad_last, stft, to_mx, to_torch)

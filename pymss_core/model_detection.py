@@ -1,4 +1,5 @@
 """Identify model architectures from YAML configuration metadata and structure."""
+from __future__ import annotations
 
 from collections.abc import Mapping
 

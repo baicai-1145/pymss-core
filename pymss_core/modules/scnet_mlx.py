@@ -1,3 +1,4 @@
+from __future__ import annotations
 import math
 import torch
 from .mlx_backend import (check_dtype, conv2d, conv_transpose2d, gelu, generic_module_forward, glu, group_norm, istft, linear_layer, mx_dtype, rnn_forward, stft, to_mx, to_torch)

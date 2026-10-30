@@ -1,3 +1,4 @@
+from __future__ import annotations
 import torch
 from pymss_core.runtime_cache import _clear_cache_dicts
 import torch.nn.functional as F

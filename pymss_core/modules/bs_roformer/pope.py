@@ -1,3 +1,4 @@
+from __future__ import annotations
 # Adapted from https://github.com/lucidrains/PoPE-pytorch (f306e51).
 # MIT License
 # Copyright (c) 2026 Phil Wang

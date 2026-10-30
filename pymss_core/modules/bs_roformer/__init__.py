@@ -1,3 +1,4 @@
+from __future__ import annotations
 from .bs_roformer import BSRoformer
 from .mel_band_roformer import MelBandRoformer
 def _conformer_variant(base, inject_norm_output=False):

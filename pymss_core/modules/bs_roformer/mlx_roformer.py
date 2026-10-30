@@ -1,3 +1,4 @@
+from __future__ import annotations
 import torch
 from ..mlx_backend import (_cache_limit, conv1d, conv2d, glu, instance_norm2d, linear, maybe_eval, mx_dtype, overlap_add, param, periodic_hann_window, reflect_pad_last, silu, to_mx, to_torch)
 from . import hyperace_segm

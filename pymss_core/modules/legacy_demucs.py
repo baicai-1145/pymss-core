@@ -1,3 +1,4 @@
+from __future__ import annotations
 import inspect
 import math
 import random
@@ -512,7 +513,10 @@ def _resolve_klass(klass):
 def _load_raw_checkpoint(model_path):
     try:
         with _legacy_pickle_modules():
-            return torch.load(model_path, map_location="cpu", weights_only=False)
+            try:
+                return torch.load(model_path, map_location="cpu", weights_only=False)
+            except TypeError:  # torch<1.13 has no weights_only kwarg
+                return torch.load(model_path, map_location="cpu")
     except ModuleNotFoundError as exc:
         if exc.name == "diffq": raise ValueError("DiffQ quantized legacy Demucs checkpoints are not supported without diffq") from exc
         raise

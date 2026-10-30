@@ -1,3 +1,4 @@
+from __future__ import annotations
 import json
 N_BINS = "n_bins"
 def int_keys(d): return {int(key) if key.isdigit() else key: value for key, value in d}

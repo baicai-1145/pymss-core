@@ -1,3 +1,4 @@
+from __future__ import annotations
 from torch import nn
 from . import BandSplitModule, MaskEstimationModule, OverlappingMaskEstimationModule, SeqBandModellingModule
 class MultiMaskBandSplitCoreBase(nn.Module):

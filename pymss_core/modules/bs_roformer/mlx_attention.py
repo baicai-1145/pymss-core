@@ -1,3 +1,4 @@
+from __future__ import annotations
 # MLX attention/FFN bridge: runs bs_roformer transformer blocks (rotary + gate)
 # on MPS by round-tripping torch<->mx. Rotary has a Metal-kernel fast path.
 import torch

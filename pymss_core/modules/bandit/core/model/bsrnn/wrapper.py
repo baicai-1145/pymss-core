@@ -1,3 +1,4 @@
+from __future__ import annotations
 import torch
 from .....mlx_backend import MpsBackendMixin
 from .._spectral import _SpectralComponent

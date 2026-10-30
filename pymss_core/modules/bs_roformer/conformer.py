@@ -1,3 +1,4 @@
+from __future__ import annotations
 from torch import nn
 from torch.nn import Module, ModuleList
 from .transformer import (Attention, FeedForward, RMSNorm, default_cuda_attention_backend, set_cuda_attention_backend, set_mps_attention_backend)

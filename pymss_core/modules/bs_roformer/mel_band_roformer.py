@@ -1,3 +1,4 @@
+from __future__ import annotations
 import torch
 from torch.nn import Module
 from .._dsp import mel_filterbank

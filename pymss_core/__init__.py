@@ -1,4 +1,5 @@
 """Core model, configuration, and checkpoint API for music source separation."""
+from __future__ import annotations
 from .checkpoint import load_checkpoint, load_model_weights, load_state_dict, unwrap_state_dict
 from .config import AttrDict, ConfigLoader, load_config, to_attrdict, to_plain
 from .device import (

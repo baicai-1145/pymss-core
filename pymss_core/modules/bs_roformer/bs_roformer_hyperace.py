@@ -1,3 +1,4 @@
+from __future__ import annotations
 import torch
 from .bs_roformer import BSRoformer
 from .common import MaskEstimator as RoformerMaskEstimator

@@ -1,3 +1,4 @@
+from __future__ import annotations
 import torch
 from torch import nn
 from pymss_core.npu_fft import istft_npu, stft_npu, torch_stft_blocked

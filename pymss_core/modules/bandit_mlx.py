@@ -1,3 +1,4 @@
+from __future__ import annotations
 import torch
 from .bandit.tfmodel import ResidualRNN, Transpose
 from .mlx_backend import (check_dtype, generic_activation, glu, group_norm, istft, layer_norm, linear_layer, mx_dtype, periodic_hann_window, rnn_forward, stft, to_mx, to_torch)

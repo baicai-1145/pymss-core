@@ -14,6 +14,7 @@ Enabled via ``pymss_core.npu_rnn.install_rnn_cpu_fallback()`` (formerly
 ``install_npu_rnn_fallback``).
 """
 from __future__ import annotations
+from __future__ import annotations
 
 from functools import wraps
 

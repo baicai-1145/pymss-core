@@ -1,4 +1,5 @@
 """Small DSP helpers needed by model definitions."""
+from __future__ import annotations
 import numpy as np
 def hz_to_midi(hz): """Convert frequencies in Hz to MIDI note numbers."""; return 69.0 + 12.0 * np.log2(np.asarray(hz) / 440.0)
 def midi_to_hz(midi): """Convert MIDI note numbers to frequencies in Hz."""; return 440.0 * np.exp2((np.asarray(midi) - 69.0) / 12.0)

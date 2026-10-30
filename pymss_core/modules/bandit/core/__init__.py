@@ -1,3 +1,4 @@
+from __future__ import annotations
 __all__ = ("MultiMaskMultiSourceBandSplitRNNSimple",)
 def __getattr__(name):
     if name == "MultiMaskMultiSourceBandSplitRNNSimple":

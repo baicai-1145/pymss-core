@@ -1,4 +1,5 @@
 """Lifecycle cleanup for derived model tensors, independent of inference backend."""
+from __future__ import annotations
 
 
 def _clear_cache_dicts(module, *names):

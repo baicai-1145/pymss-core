@@ -1,3 +1,4 @@
+from __future__ import annotations
 from yaml import YAMLError
 
 from .config import load_config

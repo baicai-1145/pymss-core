@@ -1,3 +1,4 @@
+from __future__ import annotations
 # Shared MLX full-backend kernel. One copy of every torch->mx primitive used by
 # the per-family adapters (mdx23c/demucs/bandit/scnet/apollo/roformer).
 # mx stays a call-time import: MLX is an optional dependency.

@@ -1,3 +1,4 @@
+from __future__ import annotations
 from ....bandsplit import NormFC as _NormFC
 from ....bandsplit import _ConfiguredBandSplitModule
 from ....maskestim import (BaseNormMLP, MaskEstimationModule, MaskEstimationModuleBase, MaskEstimationModuleSuperBase, MultAddNormMLP, NormMLP, OverlappingMaskEstimationModule)
