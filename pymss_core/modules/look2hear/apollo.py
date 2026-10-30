@@ -1,6 +1,7 @@
 from __future__ import annotations
 import torch
 import torch.nn.functional as F
+import pymss_core.compat  # noqa: F401  (rms_norm backport for torch<2.4)
 from torch import nn
 from pymss_core.npu_fft import istft_npu, stft_npu, torch_stft_blocked
 from ..mlx_backend import MpsBackendMixin

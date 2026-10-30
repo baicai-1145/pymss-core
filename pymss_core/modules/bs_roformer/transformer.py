@@ -2,6 +2,7 @@ from __future__ import annotations
 import torch
 from pymss_core.runtime_cache import _clear_cache_dicts
 import torch.nn.functional as F
+import pymss_core.compat  # noqa: F401  (rms_norm backport for torch<2.4)
 from torch import nn
 from torch.nn import Module, ModuleList
 from .attend import Attend

@@ -35,7 +35,10 @@ class RotaryEmbedding(nn.Module):
         # Keep inverse frequencies precise when the surrounding network is cast.
         # Detach before super(): it may replace the Parameter storage in place.
         freqs = self.freqs.detach()
-        result = super()._apply(fn, recurse=recurse)
+        try:
+            result = super()._apply(fn, recurse=recurse)
+        except TypeError:  # torch<1.12 _apply has no recurse kwarg
+            result = super()._apply(fn)
         if self.freqs.dtype in (torch.float16, torch.bfloat16):
             self.freqs.data = freqs.to(device=self.freqs.device, dtype=torch.float32)
         self.clear_runtime_cache()
