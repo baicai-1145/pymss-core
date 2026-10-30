@@ -1149,16 +1149,6 @@ def install_fft_dtype_shim() -> bool:
     if "fft_dtype" in _installed:
         return False
 
-    # Lazy capability probe: if the vendor FFT accepts a tiny half-precision
-    # transform, skip promotion entirely (pure pass-through, zero overhead).
-    # Stacks that reject it raise cleanly (hipFFT RuntimeError,
-    # CUFFT_NOT_IMPLEMENTED), which is safe on the ROCm/MACA-class devices
-    # this shim is enabled for.
-    _native_half_fft = {"ok": None}
-
-    def _probe_native_half():
-        if _native_half_fft["ok"] is not None:
-            return _native_half_fft["ok"]
         try:
             torch.fft.rfft(torch.zeros(16, device="cuda", dtype=torch.float16))
             torch.cuda.synchronize()
@@ -1176,7 +1166,7 @@ def install_fft_dtype_shim() -> bool:
         def make_guarded(op, orig):
             def guarded(input, *args, **kwargs):
                 device = getattr(input, "device", None)
-                if device is not None and device.type not in ("cpu", "meta") and not _probe_native_half():
+                if device is not None and device.type not in ("cpu", "meta") :
                     if input.dtype in (torch.float16, torch.bfloat16):
                         out = orig(input.float(), *args, **kwargs)
                         return out.to(input.dtype) if out.is_floating_point() else out
@@ -1206,13 +1196,13 @@ def install_fft_dtype_shim() -> bool:
 
     def stft(input, *args, **kwargs):
         promoted, kind = _promote(input)
-        if kind is not None and input.device.type not in ("cpu", "meta") and not _probe_native_half():
+        if kind is not None and input.device.type not in ("cpu", "meta") :
             return original_stft(promoted, *args, **kwargs)
         return original_stft(input, *args, **kwargs)
 
     def istft(input, *args, **kwargs):
         promoted, kind = _promote(input)
-        if kind is not None and input.device.type not in ("cpu", "meta") and not _probe_native_half():
+        if kind is not None and input.device.type not in ("cpu", "meta") :
             out = original_istft(promoted, *args, **kwargs)
             return out.to(input.dtype if kind is torch.complex32 else kind) if out.is_floating_point() else out
         return original_istft(input, *args, **kwargs)
