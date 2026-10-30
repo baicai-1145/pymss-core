@@ -1,6 +1,14 @@
 import os
 from collections import defaultdict
-from itertools import accumulate, pairwise
+try:
+    from itertools import accumulate, pairwise
+except ImportError:  # py3.8/3.9
+    from itertools import accumulate, tee
+
+    def pairwise(iterable):
+        a, b = tee(iterable)
+        next(b, None)
+        return zip(a, b)
 import torch
 from pymss_core.runtime_cache import _clear_cache_dicts
 import torch.nn.functional as F
