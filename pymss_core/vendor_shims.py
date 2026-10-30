@@ -1528,6 +1528,35 @@ def install_as_strided_shim(device_type: str) -> bool:
     return True
 
 
+
+
+def install_unfold_shim(device_type: str) -> bool:
+    """Replace ``Tensor.unfold`` whose vendor kernel faults (GCU/T20)."""
+    if "unfold" in _installed:
+        return False
+    original = torch.Tensor.unfold
+
+    def unfold_safe(self, dimension, size, step):
+        if self.device.type == device_type:
+            import numpy as _np
+            dim = self.dim() + dimension if dimension < 0 else dimension
+            n = self.shape[dim]
+            starts = _np.arange(0, max(int(n) - int(size), 0) + 1, step)
+            windows = len(starts)
+            idx = torch.from_numpy(starts[:, None] + _np.arange(int(size))[None, :]).to(self.device)
+            picked = self.index_select(dim, idx.reshape(-1))
+            picked = picked.reshape(*self.shape[:dim], windows, int(size), *self.shape[dim + 1:])
+            perm = list(range(picked.dim()))
+            perm.remove(dim + 1)
+            perm.append(dim + 1)
+            return picked.permute(*perm)
+        return original(self, dimension, size, step)
+
+    torch.Tensor.unfold = unfold_safe
+    _installed.add("unfold")
+    return True
+
+
 def install_vendor_shims(
     device_type: str,
     *,
@@ -1546,6 +1575,7 @@ def install_vendor_shims(
     sdpa: bool = False,
     rope: bool = False,
     as_strided_shim: bool = False,
+    unfold_shim: bool = False,
 ) -> list[str]:
     """Install the shims a device profile asks for.
 
@@ -1606,6 +1636,8 @@ def install_vendor_shims(
             installed.append(name)
     if as_strided_shim and install_as_strided_shim(device_type):
         installed.append("as_strided")
+    if unfold_shim and install_unfold_shim(device_type):
+        installed.append("unfold")
     return installed
 
 
