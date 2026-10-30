@@ -175,7 +175,7 @@ _PROFILES: dict[str, DeviceProfile] = {
     HYGON: DeviceProfile(HYGON, "cuda", fft_dtype_shim=True),
     ILUVATAR: DeviceProfile(ILUVATAR, "cuda", fft_dtype_shim=True),
     METAX: DeviceProfile(METAX, "cuda", fft_dtype_shim=True),
-    ENFLAME: DeviceProfile(ENFLAME, "xla", plugin="torch_gcu"),
+    ENFLAME: DeviceProfile(ENFLAME, "xla", plugin="torch_gcu", complex_fft=False),
     # Measured on BIREN106M + torch 2.7.0+cpu / torch-br 1.7.0.20700 (SUPA 1.9.0),
     # 31.75 GiB, device type ``supa``:
     # * ``stft(return_complex=True)`` raises "does not support return_complex=True
