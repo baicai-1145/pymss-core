@@ -130,6 +130,7 @@ class DeviceProfile:
     complex_cat: bool = False
     fft_shim: bool = False
     fft_dtype_shim: bool = False
+    as_strided_shim: bool = False
     std_shim: bool = False
     cpu_shim: bool = False
     sdpa_shim: bool = False
@@ -175,7 +176,7 @@ _PROFILES: dict[str, DeviceProfile] = {
     HYGON: DeviceProfile(HYGON, "cuda", fft_dtype_shim=True),
     ILUVATAR: DeviceProfile(ILUVATAR, "cuda", fft_dtype_shim=True),
     METAX: DeviceProfile(METAX, "cuda", fft_dtype_shim=True),
-    ENFLAME: DeviceProfile(ENFLAME, "xla", plugin="torch_gcu", complex_fft=False),
+    ENFLAME: DeviceProfile(ENFLAME, "xla", plugin="torch_gcu", complex_fft=False, as_strided_shim=True),
     # Measured on BIREN106M + torch 2.7.0+cpu / torch-br 1.7.0.20700 (SUPA 1.9.0),
     # 31.75 GiB, device type ``supa``:
     # * ``stft(return_complex=True)`` raises "does not support return_complex=True
@@ -508,6 +509,7 @@ def prepare_device_alias(alias: str) -> str:
         fft=profile_now.fft_shim,
         fft_dtype=profile_now.fft_dtype_shim,
         std=profile_now.std_shim,
+        as_strided_shim=profile_now.as_strided_shim,
         cpu=profile_now.cpu_shim,
         sdpa=profile_now.sdpa_shim,
         rope=profile_now.rope_shim,

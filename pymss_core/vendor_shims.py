@@ -1502,6 +1502,42 @@ SHIMS = {
 }
 
 
+
+def install_as_strided_shim(device_type: str) -> bool:
+    """Replace ``as_strided`` for vendor backends whose kernel faults.
+
+    TopsRider 2.5 (torch 1.10, T20) SIGILLs inside
+    ``torch_dtu::XLANativeFunctions::as_strided`` for the sliding-window
+    layouts the roformer band-split builds.  The gather-based emulation is
+    always correct (it materializes the view) at the cost of one copy.
+    """
+    if "as_strided" in _installed:
+        return False
+    original = torch.as_strided
+
+    def as_strided_safe(input, size, stride, storage_offset=None):
+        if getattr(input, "device", None) is not None and input.device.type == device_type:
+            offset = 0 if storage_offset is None else int(storage_offset)
+            shape = tuple(int(d) for d in size)
+            strides = tuple(int(v) for v in stride)
+            flat = input.contiguous().reshape(-1)
+            import numpy as _np
+            grids = _np.meshgrid(*[_np.arange(s) for s in shape], indexing="ij")
+            idx = _np.zeros(shape, dtype=_np.int64)
+            for grid, st in zip(grids, strides):
+                idx += grid.astype(_np.int64) * st
+            idx += offset
+            return flat[torch.from_numpy(idx).to(flat.device)]
+        return original(input, size, stride, storage_offset=storage_offset)
+
+    torch.as_strided = as_strided_safe
+    torch.Tensor.as_strided = lambda self, size, stride, storage_offset=None: as_strided_safe(
+        self, size, stride, storage_offset
+    )
+    _installed.add("as_strided")
+    return True
+
+
 def install_vendor_shims(
     device_type: str,
     *,
@@ -1519,6 +1555,7 @@ def install_vendor_shims(
     cpu: bool = False,
     sdpa: bool = False,
     rope: bool = False,
+    as_strided_shim: bool = False,
 ) -> list[str]:
     """Install the shims a device profile asks for.
 
@@ -1577,6 +1614,8 @@ def install_vendor_shims(
     for name in wanted:
         if SHIMS[name]():
             installed.append(name)
+    if as_strided_shim and install_as_strided_shim(device_type):
+        installed.append("as_strided")
     return installed
 
 
