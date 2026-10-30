@@ -235,6 +235,7 @@ _HOST_DEVICE_TYPES = ("cpu", "mps")
 #: Private device types that imply a vendor without any probing.
 _DEVICE_TYPE_VENDOR: dict[str, str] = {
     "npu": ASCEND,
+    "xla": ENFLAME,  # torch_gcu is torch_xla lineage: gcu_device() -> xla:0
     "gcu": ENFLAME,
     "mlu": MLU,
     "supa": BIREN,
