@@ -171,7 +171,7 @@ _PROFILES: dict[str, DeviceProfile] = {
     NVIDIA: DeviceProfile(NVIDIA, "cuda"),
     ROCM: DeviceProfile(ROCM, "cuda"),
     HYGON: DeviceProfile(HYGON, "cuda", fft_dtype_shim=True),
-    ILUVATAR: DeviceProfile(ILUVATAR, "cuda"),
+    ILUVATAR: DeviceProfile(ILUVATAR, "cuda", fft_dtype_shim=True),
     METAX: DeviceProfile(METAX, "cuda", fft_dtype_shim=True),
     ENFLAME: DeviceProfile(ENFLAME, "gcu", plugin="torch_gcu"),
     # Measured on BIREN106M + torch 2.7.0+cpu / torch-br 1.7.0.20700 (SUPA 1.9.0),
