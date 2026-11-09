@@ -6,6 +6,28 @@ from torch.nn import functional as F
 from ..config import to_plain
 from .demucs_local import (CrossTransformerEncoder, HDecLayer, HEncLayer, MultiWrap, ScaledEmbedding, ispectro, pad1d, rescale_module, spectro)
 from .mlx_backend import MpsBackendMixin
+def _pad_complex(z: torch.Tensor, pad) -> torch.Tensor:
+    """``F.pad`` for a complex tensor, applied on the real/imaginary planes.
+
+    Some backends have no complex fill/copy kernel, so padding a complex tensor
+    raises "SetMUTensorDType Unsupported tensor dtype: ComplexFloat" (Moore
+    Threads MUSA).  Moving the plane axis to the front pads exactly the same
+    spatial dimensions and is numerically identical.
+
+    Args:
+        z: Complex tensor to pad.
+        pad: Pad spec for the last two dimensions, in ``F.pad`` order.
+
+    Returns:
+        The padded complex tensor.
+    """
+    if not z.is_complex():
+        return F.pad(z, pad)
+    planes = torch.view_as_real(z).movedim(-1, 0)
+    planes = F.pad(planes, pad)
+    return torch.view_as_complex(planes.movedim(0, -1).contiguous())
+
+
 class HTDemucs(MpsBackendMixin, nn.Module):
     def __init__(
         self,
@@ -86,7 +108,7 @@ class HTDemucs(MpsBackendMixin, nn.Module):
         z = spectro(x, nfft, hl)[..., :-1, :]
         assert z.shape[-1] == le + 4, (z.shape, x.shape, le)
         return z[..., 2 : 2 + le]
-    def _ispec(self, z, length=None, scale=0): hl = self.hop_length // (4**scale); z = F.pad(z, (2, 2, 0, 1)); pad = hl // 2 * 3; le = hl * math.ceil(length / hl) + 2 * pad; return ispectro(z, hl, length=le)[..., pad : pad + length]
+    def _ispec(self, z, length=None, scale=0): hl = self.hop_length // (4**scale); z = _pad_complex(z, (2, 2, 0, 1)); pad = hl // 2 * 3; le = hl * math.ceil(length / hl) + 2 * pad; return ispectro(z, hl, length=le)[..., pad : pad + length]
     def _magnitude(self, z):
         if self.cac: B, C, Fr, T = z.shape; return torch.view_as_real(z).permute(0, 1, 4, 2, 3).reshape(B, C * 2, Fr, T)
         return z.abs()

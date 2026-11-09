@@ -30,6 +30,7 @@ the native path and can be switched to the fallback path per-run.
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass, replace
 
 import torch
@@ -43,6 +44,7 @@ ENFLAME = "enflame"
 BIREN = "biren"
 ASCEND = "ascend"
 MLU = "mlu"
+MOORE = "moore"
 MPS = "mps"
 XPU = "xpu"
 CPU = "cpu"
@@ -64,6 +66,8 @@ DEVICE_ALIASES: tuple[str, ...] = (
     "metax",
     "enflame",
     "hygon",
+    "musa",
+    "moore",
 )
 
 #: ``--device`` alias -> vendor key.
@@ -82,6 +86,8 @@ ALIAS_TO_VENDOR: dict[str, str] = {
     "metax": METAX,
     "enflame": ENFLAME,
     "hygon": HYGON,
+    "musa": MOORE,
+    "moore": MOORE,
     "cpu": CPU,
 }
 
@@ -137,6 +143,7 @@ class DeviceProfile:
     cpu_shim: bool = False
     sdpa_shim: bool = False
     rope_shim: bool = False
+    rope_kernel_shim: bool = False
     scatter_add: bool = True
     dilated_conv_allowed: frozenset[tuple[int, int]] = frozenset()
     amp: bool = True
@@ -220,10 +227,126 @@ _PROFILES: dict[str, DeviceProfile] = {
     # Ascend's torch_npu builds ship npu_lstm/npu_gru without inference support
     # and lack a complex STFT path, so both fallbacks are part of the profile.
     ASCEND: DeviceProfile(ASCEND, "npu", plugin="torch_npu", complex_fft=False, rnn=False, multi_device=False),
+    # ---- Moore Threads (MUSA) ------------------------------------------------
+    # Two entries: ``MOORE`` is what we MEASURED on mp 2.1, ``_MOORE_TENSORCORE``
+    # is what we PREDICT for mp >= 2.2.  ``_resolve_profile`` picks between them
+    # from ``torch.musa.get_device_capability()``, so the same pymss build serves
+    # both hardware generations and neither is pinned to today's gaps.
+    #
+    # ---- mp 2.1: MEASURED ------------------------------------------------
+    # MTT S70 / S80 (the only two 春晓 (Chunxiao) parts sold as consumer desktop
+    # cards) and the S3000 workstation part.  Everything here was measured on an
+    # MTT S70 with torch 2.7.1 + torch_musa 2.7.1 + MUSA SDK 4.3.0.CC2.1 +
+    # driver 3.3.0, which is also the HIGHEST stack that generation can run:
+    #
+    #   torch_musa  2.7.1        (2.9.x needs MUSA SDK >= 4.3.2, 2.11 needs >= 5.1)
+    #   MUSA SDK    4.3.0.CC2.1  (mcc 4.3.0, muDNN 3.1.0.CC2.1, driver 3.3.0)
+    #
+    # Raising either breaks mp 2.1 outright: the newer user-space SDK and driver
+    # do not run those cards, and torch_musa >= 2.9 refuses to load.  Building
+    # torch_musa for the desktop cards (S70/S80) also needs USE_MCCL=0 -- the SDK
+    # ships no MCCL for them; the S3000 does have MCCL -- and
+    # TORCH_MUSA_ARCH_LIST=21 keeps the build to mp_21.
+    #
+    # On that stack almost everything is native -- rfft/irfft 1.9e-07,
+    # complex-by-real rel 0, complex cat/fill/copy, ``_thnn_fused_gru_cell``,
+    # ``_native_multi_head_attention`` -- so only the gaps annotated below are
+    # left; every other flag keeps its native default.  What remains missing is
+    # hardware-gated rather than version-gated: flash SDPA and fp16 muFFT both
+    # need ``mp >= 2.2``, and fp16 muDNN conv aborts on mp_21 (RunFusion).
+    MOORE: DeviceProfile(MOORE, "musa", plugin="torch_musa", fft_dtype_shim=True, scatter_add=False, rope_kernel_shim=True, amp=False, multi_device=False),
     MPS: DeviceProfile(MPS, "mps", complex_fft=False, rnn=True, amp=True, channels_last=False, multi_device=False),
     XPU: DeviceProfile(XPU, "xpu", amp=False, channels_last=False, multi_device=False),
     CPU: DeviceProfile(CPU, "cpu", amp=False, channels_last=False, multi_device=False),
 }
+
+#: Moore Threads profile for compute capability (2, 2) and up -- PREDICTED, not
+#: measured.  Kept next to the measured one so the hardware generation, not the
+#: vendor, decides the flags (the same rule PR #40 applies to every vendor).
+#:
+#: Why these three flags flip, and why nothing else changes:
+#:
+#: * ``amp=True``: mp >= 2.2 is where MUSA parts gain tensor-matrix units.  The
+#:   mp 2.1 failures we measured are muDNN implementation gaps, not torch gates --
+#:   ``ConvNd MUDNN failed in: RunFusion`` for fp16 conv1d/conv2d, and
+#:   ``mtgpu_impl_datacast MUDNN failed`` for bfloat16 -- and both are exactly the
+#:   kind of gap that closes when the fused kernels exist for the arch.  Recheck
+#:   bf16 before switching ``amp_dtype``; the default stays fp16.
+#: * ``multi_device=True``: MCCL ships for every MUSA part above the S3000; the
+#:   S3000 itself has none, which is why the mp 2.1 entry keeps it off.  A build
+#:   compiled with ``USE_MCCL=0`` cannot do multi-card whatever the hardware says,
+#:   so a distributed run also needs the matching wheel.
+#: * flash SDPA needs nothing from us: the vendor gates it in ``SDPUtils.h`` with
+#:   ``(arch_major > 2) || (arch_major == 2 && arch_minor > 1)``, so on mp >= 2.2
+#:   ``F.scaled_dot_product_attention`` picks the flash kernel by itself.  We only
+#:   keep ``sdpa_shim=False`` so nothing replaces it.
+#:
+#: What deliberately does NOT change: the complex gaps.  Even the newest torch_musa
+#: (main, 2.13 line) still has no complex ``index_add_`` (``musa/Indexing.mu`` only
+#: dispatches float types) and no complex pad (``PadImpl`` has an explicit
+#: dtype whitelist without complex); only complex ``scatter_add_`` has landed, and
+#: not yet in a release.  So ``scatter_add=False`` stays until that ships.
+#:
+#: Verify on real mp >= 2.2 hardware before trusting any of this: run
+#: ``tools/musa_probe.py`` and diff it against the mp 2.1 record, then flip the
+#: flags this profile got wrong.  ``fft_dtype_shim`` is the first candidate to
+#: drop once half-precision muFFT is confirmed working there.
+_MOORE_TENSORCORE = DeviceProfile(
+    MOORE, "musa", plugin="torch_musa",
+    fft_dtype_shim=True,          # likely droppable on mp >= 2.2 -- verify first
+    scatter_add=False,            # complex index_add_/pad missing in every version
+    rope_kernel_shim=True,
+    amp=True,
+    multi_device=True,
+)
+
+
+def _moore_capability() -> tuple[int, int] | None:
+    """Return the compute capability of the current MUSA device, if knowable.
+
+    Only an already-imported plugin is consulted: importing torch_musa from here
+    would initialise the device just to answer a question about a profile.
+
+    Returns:
+        ``(major, minor)`` such as ``(2, 1)``, or ``None`` when torch_musa is not
+        loaded or the query fails.
+    """
+    module = sys.modules.get("torch_musa")
+    if module is None:
+        return None
+    try:
+        capability = torch.musa.get_device_capability()
+    except Exception:
+        return None
+    if isinstance(capability, str):  # some builds report "2.1"
+        major, _, minor = capability.partition(".")
+        try:
+            return int(major), int(minor)
+        except ValueError:
+            return None
+    try:
+        major, minor = capability
+        return int(major), int(minor)
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolve_profile(vendor: str) -> DeviceProfile:
+    """Return the profile variant that matches the hardware we are running on.
+
+    Args:
+        vendor: Vendor key from :data:`ALIAS_TO_VENDOR`.
+
+    Returns:
+        The measured profile for that vendor; for Moore Threads the tensor-core
+        variant once the device reports capability (2, 2) or higher.
+    """
+    if vendor == MOORE:
+        capability = _moore_capability()
+        if capability is not None and (capability[0] > 2 or (capability[0] == 2 and capability[1] >= 2)):
+            return _MOORE_TENSORCORE
+    return _PROFILES[vendor]
+
 
 #: Substrings looked for in ``torch.cuda.get_device_name()`` (lowercased).
 _VENDOR_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -248,6 +371,7 @@ _DEVICE_TYPE_VENDOR: dict[str, str] = {
     "supa": BIREN,
     "mps": MPS,
     "xpu": XPU,
+    "musa": MOORE,
     "cpu": CPU,
 }
 
@@ -352,7 +476,7 @@ def device_profile(device=None) -> DeviceProfile:
     cached = _cache.get(device_type)
     if cached is not None:
         return cached
-    profile = _with_overrides(_PROFILES[detect_vendor(device_type)])
+    profile = _with_overrides(_resolve_profile(detect_vendor(device_type)))
     _cache[device_type] = profile
     return profile
 
@@ -367,7 +491,7 @@ def profile_for_alias(alias: str | None) -> DeviceProfile | None:
     if not alias:
         return None
     vendor = ALIAS_TO_VENDOR.get(str(alias).strip().lower())
-    return _PROFILES[vendor] if vendor else None
+    return _resolve_profile(vendor) if vendor else None
 
 
 def requires_plugin(alias: str) -> str | None:
@@ -519,6 +643,7 @@ def prepare_device_alias(alias: str) -> str:
         cpu=profile_now.cpu_shim,
         sdpa=profile_now.sdpa_shim,
         rope=profile_now.rope_shim,
+        rope_kernel=profile_now.rope_kernel_shim,
     )
     # Recurrent cells: the fused _VF.lstm is both wrong and catastrophically slow
     # on BIREN (605 s for one (18, 57, 128) call), and the profile already says
