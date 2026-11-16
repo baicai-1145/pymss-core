@@ -19,6 +19,8 @@ def get_model_from_config(model_type, config_path, model_kwargs_override=None):
         return get_model(config), config
     if model_type == "vr": raise ValueError("VR network modules do not use YAML config loading")
     models = {
+        "adaptive_bs_roformer": ("bs_roformer", "AdaptiveBSRoformer", "model"),
+        "adaptive_mel_band_roformer": ("bs_roformer", "AdaptiveMelBandRoformer", "model"),
         "mel_band_roformer": ("bs_roformer", "MelBandRoformer", "model"),
         "mel_band_conformer": ("bs_roformer", "MelBandConformer", "model"),
         "bs_roformer": ("bs_roformer", "BSRoformer", "model"),

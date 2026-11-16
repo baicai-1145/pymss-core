@@ -8,6 +8,7 @@ class ModelTypeDetectionError(RuntimeError):
 
 
 _MODEL_TYPES = frozenset({
+    "adaptive_bs_roformer", "adaptive_mel_band_roformer",
     "bs_roformer", "bs_roformer_hyperace", "bs_conformer",
     "mel_band_roformer", "mel_band_conformer", "htdemucs", "mdx23c",
     "apollo", "bandit", "bandit_v2", "scnet", "vr",

@@ -130,7 +130,7 @@ class RoformerRuntimeMixin(MpsBackendMixin):
             mask = mask.to(dtype=stft_repr.dtype)
         stft_repr = torch.view_as_complex(stft_repr.unsqueeze(1))
         return stft_repr * torch.view_as_complex(mask).to(dtype=stft_repr.dtype)
-def forward_roformer_mask_core(module, stft_repr):
+def forward_roformer_features(module, stft_repr):
     b, fs, model_t, complex_dim = stft_repr.shape
     # STFT stays fp32 for complex64 reconstruction. Explicit low-precision model
     # conversion must cast features at the network boundary, without autocast.
@@ -147,7 +147,9 @@ def forward_roformer_mask_core(module, stft_repr):
         x = time_transformer(x.permute(0, 2, 1, 3).reshape(b * f, t, d)).reshape(b, f, t, d).permute(0, 2, 1, 3)
         x = freq_transformer(x.reshape(b * t, f, d)).reshape(b, t, f, d)
         if residual_store is not None: residual_store.append(x)
-    return mask_to_complex_shape(module._estimate_masks(module.final_norm(x)), complex_dim=2)
+    return module.final_norm(x)
+def forward_roformer_mask_core(module, stft_repr):
+    return mask_to_complex_shape(module._estimate_masks(forward_roformer_features(module, stft_repr)), complex_dim=2)
 def stft_roformer(module, raw_audio):
     from pymss_core.npu_fft import stft_npu, torch_stft_blocked
     device, x_is_mps = raw_audio.device, raw_audio.device.type == "mps"

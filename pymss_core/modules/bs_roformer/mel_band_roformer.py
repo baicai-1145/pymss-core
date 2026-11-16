@@ -42,9 +42,10 @@ class MelBandRoformer(RoformerRuntimeMixin, Module):
         x = stft_repr[:, self.freq_indices]
         self._warm_group_cache(x)
         masks = self._forward_mask_core(x)
+        return self.apply_masks(stft_repr, masks)
+    def apply_masks(self, stft_repr, masks):
         stft_repr = torch.view_as_complex(stft_repr.unsqueeze(1))
-        num_stems = self._active_source_count()
-        b, s, f, t = context.batch, num_stems, stft_repr.shape[2], stft_repr.shape[-1]
+        b, s, f, t = masks.shape[0], masks.shape[1], stft_repr.shape[2], stft_repr.shape[-1]
         if stft_repr.device.type in ("mps", "npu") or scatter_add_blocked(stft_repr.device):
             # Complex scatter_add_ is unavailable on these stacks; fold the bands
             # back onto the frequency axis in real space instead.
