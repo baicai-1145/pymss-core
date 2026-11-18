@@ -104,6 +104,48 @@ class RMSNorm(Module):
 class FeedForward(Module):
     def __init__(self, dim, mult=4, dropout=0.0): super().__init__(); self.net = nn.Sequential(RMSNorm(dim), nn.Linear(dim, int(dim * mult)), nn.GELU(), nn.Dropout(dropout), nn.Linear(int(dim * mult), dim), nn.Dropout(dropout))
     def forward(self, x): return self.net(x)
+class MoEFFN(Module):
+    """Sparse MoE feed-forward: content-routed top-k experts + one shared expert.
+
+    Router sees the token itself (no external conditioning).  The switch-style
+    load-balancing auxiliary loss is stashed on ``self.aux_loss`` during
+    training and collected by ``BSRoformer.pop_moe_aux_loss``.
+    """
+
+    def __init__(self, *, dim, mult=4, dropout=0.0, num_experts=8, top_k=2, shared_expert=True):
+        super().__init__()
+        self.experts = ModuleList([FeedForward(dim, mult=mult, dropout=dropout) for _ in range(num_experts)])
+        self.shared = FeedForward(dim, mult=mult, dropout=dropout) if shared_expert else None
+        self.router = nn.Linear(dim, num_experts, bias=False)
+        self.num_experts, self.top_k = num_experts, top_k
+        self.aux_loss = None
+
+    def forward(self, x):
+        shape = x.shape
+        probs = self.router(x).softmax(dim=-1)
+        w, idx = torch.topk(probs, self.top_k, dim=-1)
+        w = w / w.sum(dim=-1, keepdim=True).clamp(min=1e-9)
+        out = self.shared(x) if self.shared is not None else torch.zeros_like(x)
+        flat_x = x.reshape(-1, shape[-1])
+        flat_w, flat_i = w.reshape(-1, self.top_k), idx.reshape(-1, self.top_k)
+        flat_o = torch.zeros_like(flat_x)
+        for e in range(self.num_experts):
+            m = (flat_i == e).any(dim=-1)
+            if m.any():
+                sel = flat_i[m] == e
+                wsum = (flat_w[m] * sel).sum(dim=-1, keepdim=True)
+                flat_o[m] += self.experts[e](flat_x[m]) * wsum
+        out = out + flat_o.reshape(shape)
+        if self.training:
+            imp = probs.mean(dim=tuple(range(probs.ndim - 1)))
+            usage = torch.zeros_like(imp)
+            for e in range(self.num_experts):
+                usage[e] = (flat_i == e).float().sum()
+            usage = usage / usage.sum().clamp(min=1.0)
+            self.aux_loss = self.num_experts * (imp * usage).sum()
+        return out
+
+
 class Attention(Module):
     def __init__(self, dim, heads=8, dim_head=64, dropout=0.0, shared_qkv_bias=None, shared_out_bias=None, rotary_embed=None, flash=True, pope_embed=None):
         super().__init__()
@@ -207,10 +249,10 @@ class ConvFFN(Module):
 
 
 class Transformer(Module):
-    def __init__(self, *, dim, depth, dim_head=64, heads=8, attn_dropout=0.0, ff_dropout=0.0, ff_mult=4, norm_output=True, rotary_embed=None, flash_attn=True, shared_qkv_bias=None, shared_out_bias=None, pope_embed=None):
+    def __init__(self, *, dim, depth, dim_head=64, heads=8, attn_dropout=0.0, ff_dropout=0.0, ff_mult=4, norm_output=True, rotary_embed=None, flash_attn=True, shared_qkv_bias=None, shared_out_bias=None, pope_embed=None, ff_moe=None):
         super().__init__()
         self.use_pope = pope_embed is not None
-        self.layers = ModuleList([ModuleList([ Attention(dim=dim, dim_head=dim_head, heads=heads, dropout=attn_dropout, shared_qkv_bias=shared_qkv_bias, shared_out_bias=shared_out_bias, rotary_embed=rotary_embed, pope_embed=pope_embed, flash=flash_attn), FeedForward(dim=dim, mult=ff_mult, dropout=ff_dropout)]) for _ in range(depth)])
+        self.layers = ModuleList([ModuleList([ Attention(dim=dim, dim_head=dim_head, heads=heads, dropout=attn_dropout, shared_qkv_bias=shared_qkv_bias, shared_out_bias=shared_out_bias, rotary_embed=rotary_embed, pope_embed=pope_embed, flash=flash_attn), (MoEFFN(dim=dim, mult=ff_mult, dropout=ff_dropout, **ff_moe) if ff_moe else FeedForward(dim=dim, mult=ff_mult, dropout=ff_dropout))]) for _ in range(depth)])
         self.norm = RMSNorm(dim) if norm_output else nn.Identity()
         self.mps_attention_backend, self.mps_mlx_min_tokens, self.cuda_attention_backend = default_mps_attention_backend(), 128, default_cuda_attention_backend()
     def set_mps_attention_backend(self, backend=None, min_tokens=128): set_mps_attention_backend(self, backend, min_tokens, [attn for attn, _ in self.layers], keep_mlx_transformer=True)

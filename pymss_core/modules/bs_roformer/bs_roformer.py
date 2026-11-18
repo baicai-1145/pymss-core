@@ -10,7 +10,7 @@ class BSRoformer(RoformerRuntimeMixin, Module):
                  flash_attn=True, stft_n_fft=2048, stft_hop_length=512, stft_win_length=2048, stft_normalized=False,
                  stft_window_fn=None, mask_estimator_depth=2, mlp_expansion_factor=4, use_shared_bias=False,
                  zero_dc=False, skip_connection=False, conformer=False, ff_mult=4, conv_expansion_factor=2,
-                 conv_kernel_size=31, norm_output=False, use_pope=False, conv_ffn_kernel=None, **kwargs):
+                 conv_kernel_size=31, norm_output=False, use_pope=False, conv_ffn_kernel=None, ff_moe_num_experts=None, ff_moe_top_k=2, **kwargs):
         super().__init__()
         ignore_roformer_training_kwargs(kwargs)
         if use_pope and conformer: raise ValueError("PoPE is only supported for BS-RoFormer")
@@ -18,6 +18,8 @@ class BSRoformer(RoformerRuntimeMixin, Module):
         init_roformer_runtime(self, stereo, num_stems, skip_connection=skip_connection)
         shared_qkv_bias, shared_out_bias = init_roformer_shared_bias(self, dim=dim, heads=heads, dim_head=dim_head, use_shared_bias=use_shared_bias)
         transformer_kwargs = roformer_transformer_kwargs(dim=dim, heads=heads, dim_head=dim_head, attn_dropout=attn_dropout, ff_dropout=ff_dropout, flash_attn=flash_attn, norm_output=norm_output, shared_qkv_bias=shared_qkv_bias, shared_out_bias=shared_out_bias)
+        if ff_moe_num_experts:
+            transformer_kwargs = dict(transformer_kwargs, ff_moe=dict(num_experts=int(ff_moe_num_experts), top_k=int(ff_moe_top_k)))
         if conformer: init_conformer_layers(self, depth=depth, time_conformer_depth=time_transformer_depth, freq_conformer_depth=freq_transformer_depth, dim_head=dim_head, transformer_kwargs=transformer_kwargs, ff_mult=ff_mult, conv_expansion_factor=conv_expansion_factor, conv_kernel_size=conv_kernel_size)
         else: init_roformer_layers(self, depth=depth, time_transformer_depth=time_transformer_depth, freq_transformer_depth=freq_transformer_depth, dim_head=dim_head, transformer_kwargs=transformer_kwargs, use_pope=self.use_pope)
         self.conv_ffn = ConvFFN(dim=dim, mult=ff_mult, k=int(conv_ffn_kernel), dropout=ff_dropout) if conv_ffn_kernel else None
@@ -29,6 +31,15 @@ class BSRoformer(RoformerRuntimeMixin, Module):
         super().set_mps_model_backend(backend, compute_dtype)
         if self.use_pope: self.mps_model_backend = "torch"
     def _forward_mask_core(self, stft_repr): return forward_roformer_mask_core(self, stft_repr)
+    def pop_moe_aux_loss(self):
+        total = None
+        for m in self.modules():
+            if isinstance(m, __import__('pymss_core.modules.bs_roformer.transformer', fromlist=['MoEFFN']).MoEFFN):
+                if m.aux_loss is not None:
+                    total = m.aux_loss if total is None else total + m.aux_loss
+                    m.aux_loss = None
+        return total
+
     def forward(self, raw_audio):
         if self._use_mlx_full_forward(raw_audio):
             try:
