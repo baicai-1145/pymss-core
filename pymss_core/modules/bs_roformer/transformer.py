@@ -179,6 +179,33 @@ class Attention(Module):
         # slower than aclnn elementwise on 950PR (unvectorized loads), so the
         # eager sigmoid+mul path stays until triton-ascend closes that gap.
         return self.to_out((out.transpose(1, 2) * self.to_gates(x).sigmoid().unsqueeze(-1)).flatten(start_dim=-2))
+class ConvFFN(Module):
+    """Gated FFN with a depthwise *temporal* conv mid-layer.
+
+    Replaces the time-axis transformer stack when ``conv_ffn_kernel`` is set:
+    local time context at O(T * d * k) instead of O(T^2 * d) attention.
+    Operates on the (b, t, f, d) grid used by the band-split roformer core.
+    """
+
+    def __init__(self, *, dim, mult=4, k=7, dropout=0.0):
+        super().__init__()
+        h = dim * mult // 2
+        self.proj_in = nn.Linear(dim, h * 2)
+        self.conv = nn.Conv1d(h, h, k, padding=k // 2, groups=h)
+        self.proj_out = nn.Linear(h, dim)
+        self.drop = nn.Dropout(dropout)
+
+    def forward(self, x):
+        b, t, f, d = x.shape
+        u, v = self.proj_in(x).chunk(2, dim=-1)
+        h = u * torch.sigmoid(v)
+        hid = h.shape[-1]
+        h = h.permute(0, 2, 1, 3).reshape(b * f, t, hid).transpose(1, 2)
+        h = self.conv(h)
+        h = h.transpose(1, 2).reshape(b, f, t, hid).permute(0, 2, 1, 3)
+        return self.drop(self.proj_out(h))
+
+
 class Transformer(Module):
     def __init__(self, *, dim, depth, dim_head=64, heads=8, attn_dropout=0.0, ff_dropout=0.0, ff_mult=4, norm_output=True, rotary_embed=None, flash_attn=True, shared_qkv_bias=None, shared_out_bias=None, pope_embed=None):
         super().__init__()

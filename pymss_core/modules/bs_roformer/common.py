@@ -146,6 +146,7 @@ def forward_roformer_mask_core(module, stft_repr):
         b, t, f, d = x.shape
         x = time_transformer(x.permute(0, 2, 1, 3).reshape(b * f, t, d)).reshape(b, f, t, d).permute(0, 2, 1, 3)
         x = freq_transformer(x.reshape(b * t, f, d)).reshape(b, t, f, d)
+        if getattr(module, "conv_ffn", None) is not None: x = module.conv_ffn(x) + x
         if residual_store is not None: residual_store.append(x)
     return mask_to_complex_shape(module._estimate_masks(module.final_norm(x)), complex_dim=2)
 def stft_roformer(module, raw_audio):
